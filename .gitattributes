@@ -1,0 +1,5 @@
+* text=auto
+*.py text eol=lf
+*.bat text eol=crlf
+README.txt text eol=crlf
+*.png binary

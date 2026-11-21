@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.spec
+ffmpeg/
+ffmpeg_dl/
+ffmpeg_dl.zip
+test_clips/
+selftest*.txt
+selftest_export.*
+FPV-DVR-Stitcher/
+FPV-DVR-Stitcher-windows.zip
