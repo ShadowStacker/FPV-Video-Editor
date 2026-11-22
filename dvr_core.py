@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak
@@ -38,15 +38,39 @@ AW, AH = 160, 120          # analysis resolution
 BLOCK = 20                 # 8 x 6 grid of 20x20 blocks
 NOISE_T = 16.0             # block mean |horizontal pixel diff| above this = "snowy" block
                            #   (pure snow measures 22-40, picture/weak signal 2-15)
-SNOW_COVER_T = 0.85        # fraction of snowy blocks for a frame to count as pure snow
-                           #   (pure snow ~1.00, weak signal <= 0.35, clean <= 0.31)
+SNOW_COVER_T = 0.95        # fraction of snowy blocks for a frame to count as pure snow
+                           #   (pure snow ~1.00; picture, even weak, well below)
 TEAR_T = 1.30              # vertical/horizontal detail ratio; >1.3 = horizontal tearing (weak signal)
 PERSIST_T = 1.50           # temporal persistence ratio; pure snow 1.0-1.2, real picture under noise >1.8
 SMOOTH_S = 0.25            # seconds - smoothing window for the snow flag
 WEAK_SMOOTH_S = 0.5        # seconds - smoothing window for the weak flag
 LOOKBACK_S = 3.0           # seconds of signal examined before each loss of signal
+CHUNK_MIN_S = 60.0         # long single recordings are analysed in parallel chunks of at least this
+OSD_W, OSD_H, OSD_PH = 32, 18, 90   # OSD text map: 32x18 grid (from a 160x90 stroke picture)
+STATS_MATCH_T = 0.6        # correlation with the STATS-screen pattern above this = STATS screen
+STATS_MAX_S = 180.0        # never trim more than this before a power-off
+FLIGHT_GAP_S = 5.0         # static at least this long = VTX was off (new flight); shorter = dropout
+COLOUR_LOSS_T = 1.5        # receivers drop colour when the signal gets weak: chroma below this = weak
 
 LABEL_GOOD, LABEL_WEAK, LABEL_SNOW = 0, 1, 2
+
+# Betaflight post-flight STATS screen as seen in the OSD text map (32x18, 0-255), learned from
+# real DVR footage. Used when a recording has too few power-offs to learn the pattern itself.
+_STATS_TEMPLATE_HEX = (
+    "01010201020203010406050408070e0a0907080607050306030606050102010102020202030203030603040208080b06"
+    "0907080a0c0806040404050401010000030205040203050205040404090c0606030504060a0706040303030201010100"
+    "0303030303040504031d1c1f18036947612c49290e1a1e210101030101010100042622272a4012073c2e3a1006020506"
+    "0708070607030a0133310b132220000002121c231616341432292e201e0b050a0a0b06050704160238131b1d22110100"
+    "031e242819064d43231b2e3d302e040a0a0c070305030f01450b303735130000053355393d415563460d060604020107"
+    "05080706060215015f0f493b2f12010008191b1b1407374439270908080301030607070703000d012d20190200010201"
+    "050f23251c062b2b322b1915151305090706030603000a023311190e05020003031e433727033c444d3250391a2b0207"
+    "070b080306071a03300b32393b1c0301032647413a5906414f2f2b070908030809040906010719014945383019010101"
+    "0124202b2b2f1204331517272a2f263801030203030308012e0105010d000002021611231a3326051d1821272e240c2e"
+    "03020101010008012c010203020000000202030607020407070808070304030401010100010000010101010101000001"
+    "040305050505050406060807040404020201020001000100000001010201010101020406070b06040707090906040303"
+    "030303030203020200010100000001010102050804020206070205040402010204030202020102020000000001010701"
+)
+
 
 
 class Cancelled(Exception):
@@ -151,6 +175,7 @@ class Clip:
     pkt_pos: np.ndarray = None      # byte offset of every frame's packet (for diagnostics)
     pkt_size: np.ndarray = None
     blocks: np.ndarray = None       # (frames, 48) block noise grid, float16 (for diagnostics)
+    osd: np.ndarray = None          # (frames, 32*18) map of OSD-like text strokes, uint8
 
     @property
     def nframes(self) -> int:
@@ -187,11 +212,12 @@ class Segment:
 
 @dataclass
 class Settings:
-    min_cut: float = 5.0          # only cut static runs at least this long (s)
-    pad: float = 0.5              # seconds of static kept either side of a cut
+    min_cut: float = 1.0          # only cut static runs at least this long (s)
+    pad: float = 0.0              # seconds of static kept either side of a cut
     faint_protect: bool = True    # keep "snow" that hides a persistent picture
     snow_cover: float = SNOW_COVER_T
     noise_t: float = NOISE_T
+    trim_stats: bool = True       # cut the post-flight Betaflight STATS screen
 
 
 class Session:
@@ -220,6 +246,8 @@ class Session:
             self.f[k] = np.concatenate([c.feats[k] for c in clips])
         self.blocks = (np.concatenate([c.blocks for c in clips])
                        if clips and all(c.blocks is not None for c in clips) else None)
+        self.osd = (np.concatenate([c.osd for c in clips])
+                    if clips and all(c.osd is not None for c in clips) else None)
         self.labels = np.zeros(n, np.int8)
         self.segments: list[Segment] = []
         self.notes: list[str] = []
@@ -239,7 +267,7 @@ class Session:
 
     def keep_mask(self) -> np.ndarray:
         keep = np.zeros(self.n, bool)
-        padf = self.frames_for(self.settings.pad)
+        pad = self.settings.pad
         segs = self.segments
         for i, s in enumerate(segs):
             if s.action == "keep":
@@ -247,21 +275,34 @@ class Session:
             elif s.kind == "nosignal":
                 prev_kept = i > 0 and segs[i - 1].action == "keep"
                 next_kept = i + 1 < len(segs) and segs[i + 1].action == "keep"
-                if prev_kept:
-                    keep[s.f0:min(s.f1, s.f0 + padf)] = True
-                if next_kept:
-                    keep[max(s.f0, s.f1 - padf):s.f1] = True
+                if prev_kept and pad > 0:
+                    keep[s.f0:s.f1] |= self.t[s.f0:s.f1] < s.t0 + pad
+                if next_kept and pad > 0:
+                    keep[s.f0:s.f1] |= self.t[s.f0:s.f1] >= s.t1 - pad
         return keep
+
+    def play_durations(self, keep: np.ndarray | None = None) -> np.ndarray:
+        """How long each frame stays on screen in the export (0 for cut frames). Inside a
+        kept stretch a frame lasts until the next one (DVR gaps included); the last frame
+        before a cut lasts one normal frame, so no frozen frame is left at a cut."""
+        if keep is None:
+            keep = self.keep_mask()
+        nxt = np.empty(self.n)
+        if self.n:
+            nxt[:-1] = np.diff(self.t)
+            nxt[-1] = self.fdur[-1]
+        cont = np.zeros(self.n, bool)
+        cont[:-1] = keep[1:]
+        d = np.where(cont, nxt, np.minimum(nxt, self.fdur))
+        return d * keep
 
     def output_times(self, keep: np.ndarray | None = None) -> np.ndarray:
         """Output-video time at which every session frame would appear."""
-        if keep is None:
-            keep = self.keep_mask()
-        d = self.fdur * keep
+        d = self.play_durations(keep)
         return np.cumsum(d) - d
 
     def kept_duration(self) -> float:
-        return float((self.fdur * self.keep_mask()).sum())
+        return float(self.play_durations().sum())
 
 
 # ---------------------------------------------------------------------------
@@ -346,15 +387,36 @@ def _frame_features(y: np.ndarray, u: np.ndarray, v: np.ndarray, noise_t: float)
     }, blocks.astype(np.float16)
 
 
-def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
-                 noise_t: float = NOISE_T, snow_cover: float = SNOW_COVER_T) -> Clip:
+def _decode_features(c: Clip, i0: int = 0, count: int | None = None, progress=None,
+                     cancel: threading.Event | None = None, noise_t: float = NOISE_T,
+                     snow_cover: float = SNOW_COVER_T, lead: int = 0):
+    """Decode frames i0 .. i0+count (all to the end if count is None) and measure them.
+    `lead` leading frames (an overlap with the previous chunk) are measured on their own so
+    the ~1 s windows that follow stay aligned with a single-pass analysis.
+    Returns (features dict, block grid, OSD text map, number of frames decoded)."""
     ysz, csz = AW * AH, (AW // 2) * (AH // 2)
-    fsz = ysz + 2 * csz
-    win = max(8, int(round(c.fps)))            # ~1 second windows
-    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin", "-i", c.path, "-map", "0:v:0",
-           "-an", "-sn", "-dn", *passthrough_args(),
-           "-vf", f"scale={AW}:{AH}:flags=area", "-pix_fmt", "yuv420p",
-           "-f", "rawvideo", "pipe:1"]
+    oy = OSD_PH * AW                              # OSD map rows stacked under the analysis frame
+    ocz = (OSD_PH // 2) * (AW // 2)
+    fsz = ysz + oy + 2 * (csz + ocz)
+    win = window_frames(c)                        # ~1 second windows
+    # one decode gives two pictures stacked on top of each other:
+    #   160x120 frame for the static / weak-signal measurements
+    #   160x90 map of thin bright strokes (OSD text) for spotting the STATS screen
+    graph = (f"[0:v]split=2[m][o];[m]scale={AW}:{AH}:flags=area,format=yuv420p[main];"
+             f"[o]scale=320:180:flags=area,format=gray,split[a][b];[b]erosion,dilation[op];"
+             f"[a][op]blend=all_mode=difference,lut=y='if(gt(val,40),255,0)',"
+             f"scale={AW}:{OSD_PH}:flags=area,format=yuv420p[osd];[main][osd]vstack=inputs=2[out]")
+    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin"]
+    if i0 > 0:
+        # Every frame of an intra-only file is a keyframe, so seeking just past frame i0's
+        # timestamp (without ffmpeg's own trimming) starts decoding exactly at frame i0.
+        nxt = c.pts[i0 + 1] - c.pts[i0] if i0 + 1 < c.nframes else c.frame_dur
+        cmd += ["-noaccurate_seek", "-ss", f"{c.pts[i0] + 0.25 * min(nxt, c.frame_dur):.6f}"]
+    cmd += ["-i", c.path, "-filter_complex", graph, "-map", "[out]", "-an", "-sn", "-dn",
+            *passthrough_args()]
+    if count is not None:
+        cmd += ["-frames:v", str(count)]
+    cmd += ["-f", "rawvideo", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, bufsize=fsz * win, **_popen_kwargs())
     errbuf = []
@@ -362,27 +424,35 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
     t_err.start()
 
     parts = {k: [] for k in ("snow", "noise", "tear", "chroma", "bright", "hd", "vd", "motion", "persist")}
-    block_parts = []
+    block_parts, osd_parts = [], []
     prev_coarse = None
-    done = 0
+    first = True
     try:
         while True:
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            buf = proc.stdout.read(fsz * win)
+            buf = proc.stdout.read(fsz * (lead if first and lead else win))
+            first = False
             if not buf:
                 break
             k = len(buf) // fsz
             if k == 0:
                 break
             a = np.frombuffer(buf[:k * fsz], np.uint8).reshape(k, fsz)
-            y = a[:, :ysz].reshape(k, AH, AW).astype(np.float32)
-            u = a[:, ysz:ysz + csz].reshape(k, AH // 2, AW // 2).astype(np.float32)
-            v = a[:, ysz + csz:].reshape(k, AH // 2, AW // 2).astype(np.float32)
+            yall = a[:, :ysz + oy].reshape(k, AH + OSD_PH, AW)
+            y = yall[:, :AH].astype(np.float32)
+            cw = AW // 2
+            uo = ysz + oy
+            vo = uo + csz + ocz
+            u = a[:, uo:uo + csz].reshape(k, AH // 2, cw).astype(np.float32)
+            v = a[:, vo:vo + csz].reshape(k, AH // 2, cw).astype(np.float32)
             f, blk = _frame_features(y, u, v, noise_t)
             for key in f:
                 parts[key].append(f[key])
             block_parts.append(blk)
+            om = yall[:, AH:].astype(np.float32)
+            osd = om.reshape(k, OSD_H, OSD_PH // OSD_H, OSD_W, AW // OSD_W).mean(axis=(2, 4))
+            osd_parts.append(np.round(osd).astype(np.uint8).reshape(k, -1))
 
             # motion: coarse 40x30 frame-to-frame change
             coarse = y.reshape(k, 30, 4, 40, 4).mean(axis=(2, 4))
@@ -399,11 +469,9 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
                 ys = y[snowy]
                 ys = ys - ys.mean(axis=2, keepdims=True)        # drop per-line streaks/flicker
                 m = ys.mean(axis=0)
-                s = ys.std(axis=0).mean()
-                ratio = float(m.std() / (s / math.sqrt(len(ys)) + 1e-6))
+                sd = ys.std(axis=0).mean()
+                ratio = float(m.std() / (sd / math.sqrt(len(ys)) + 1e-6))
             parts["persist"].append(np.full(k, ratio, np.float32))
-
-            done += k
             if progress:
                 progress(k)
     finally:
@@ -417,31 +485,57 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
         t_err.join(timeout=2)
     if cancel is not None and cancel.is_set():
         raise Cancelled()
-
     feats = {k: (np.concatenate(v) if v else np.zeros(0, np.float32)) for k, v in parts.items()}
     n = len(feats["snow"])
-    if n == 0:
+    if n == 0 and count != 0:
         err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
         raise RuntimeError(f"Could not decode {os.path.basename(c.path)}\n{err[-1500:]}")
     blocks = np.concatenate(block_parts) if block_parts else np.zeros((0, 48), np.float16)
-    # align decoded frames with packet timestamps
+    osd = np.concatenate(osd_parts) if osd_parts else np.zeros((0, OSD_W * OSD_H), np.uint8)
+    return feats, blocks, osd, n
+
+
+def _store(c: Clip, feats, blocks, osd, n: int) -> None:
+    """Attach measurements to a clip, lining decoded frames up with packet timestamps."""
     if n != c.nframes:
         if abs(n - c.nframes) <= max(3, 0.01 * n) and c.nframes > 0:
             m = min(n, c.nframes)
             c.pts, c.pkt_pos, c.pkt_size = c.pts[:m], c.pkt_pos[:m], c.pkt_size[:m]
             feats = {k: v[:m] for k, v in feats.items()}
-            blocks = blocks[:m]
+            blocks, osd = blocks[:m], osd[:m]
         else:
             start = c.pts[0] if c.nframes else 0.0
             c.pts = start + np.arange(n) / c.fps
             c.pkt_pos = c.pkt_size = None
-    c.feats = feats
-    c.blocks = blocks
+    c.feats, c.blocks, c.osd = feats, blocks, osd
+
+
+def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
+                 noise_t: float = NOISE_T, snow_cover: float = SNOW_COVER_T) -> Clip:
+    """Measure a whole clip in one pass."""
+    _store(c, *_decode_features(c, 0, None, progress, cancel, noise_t, snow_cover))
     return c
 
 
+def window_frames(c: Clip) -> int:
+    return max(8, int(round(c.fps)))
+
+
+def _chunks_for(c: Clip, workers: int) -> list[tuple[int, int]] | None:
+    """Split one long clip into frame ranges that can be analysed in parallel, or None."""
+    if workers < 2 or c.length < CHUNK_MIN_S * 2 or c.nframes < 200 or not c.intra_only:
+        return None
+    if abs(float(c.pts[0])) > 0.001 or not _seek_works(c):
+        return None                         # exact seeking needs an indexed file starting at 0
+    k = int(min(workers * 2, max(2, c.length // CHUNK_MIN_S)))
+    w = window_frames(c)                    # chunk edges on window boundaries (same result as one pass)
+    edges = np.unique(np.concatenate([[0], (np.linspace(0, c.nframes, k + 1)[1:-1] // w * w), [c.nframes]]).astype(int))
+    return [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:]) if b > a]
+
+
 def analyze_files(paths: list[str], progress=None, cancel: threading.Event | None = None,
-                  settings: Settings | None = None, workers: int | None = None) -> Session:
+                  settings: Settings | None = None, workers: int | None = None,
+                  chunking: bool = True) -> Session:
     """progress(fraction, message)"""
     settings = settings or Settings()
     paths = list(paths)
@@ -465,18 +559,47 @@ def analyze_files(paths: list[str], progress=None, cancel: threading.Event | Non
             state["done"] += k
             d = state["done"]
         if progress:
-            progress(0.02 + 0.98 * min(1.0, d / total), f"Analysing video... {100 * d / total:4.1f}%")
+            progress(0.02 + 0.98 * min(1.0, d / total), f"Analysing video... {min(100.0, 100 * d / total):4.1f}%")
 
-    workers = workers or max(1, min(4, (os.cpu_count() or 2) - 1))
+    workers = workers or max(1, min(6, (os.cpu_count() or 2) - 1))
+    # work units: whole clips, or chunks of long clips (one long HD recording -> parallel chunks)
+    # (each chunk after the first also re-decodes the previous chunk's last frame, so the
+    #  join can be checked: if that frame doesn't match exactly, the clip is redone in one pass)
+    units = []
+    for c in clips:
+        ch = _chunks_for(c, workers) if chunking else None
+        if ch:
+            units += [(c, a, b - a) if a == 0 else (c, a - 1, b - a + 1) for a, b in ch]
+        else:
+            units.append((c, 0, None))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(analyze_clip, c, tick, cancel, settings.noise_t, settings.snow_cover) for c in clips]
+        futs = [ex.submit(_decode_features, c, a, n, tick, cancel, settings.noise_t, settings.snow_cover,
+                          0 if (n is None or a == 0) else 1)
+                for c, a, n in units]
         try:
-            for fu in futs:
-                fu.result()
+            results = [fu.result() for fu in futs]
         except BaseException:
             if cancel is not None:
                 cancel.set()
             raise
+    for c in clips:
+        mine = [(u, r) for u, r in zip(units, results) if u[0] is c]
+        if len(mine) == 1 and mine[0][0][2] is None:
+            _store(c, *mine[0][1])
+            continue
+        ok = all(r[3] == u[2] for u, r in mine)
+        for (_, prev), (_, cur) in zip(mine, mine[1:]):
+            if not ok:
+                break
+            ok = all(np.array_equal(prev[0][k][-1:], cur[0][k][:1]) for k in ("bright", "noise", "chroma", "hd"))
+        if not ok:                                       # chunks didn't line up: redo in one pass
+            analyze_clip(c, None, cancel, settings.noise_t, settings.snow_cover)
+            continue
+        parts = [r if u[1] == 0 else ({k: v[1:] for k, v in r[0].items()}, r[1][1:], r[2][1:], r[3] - 1)
+                 for u, r in mine]
+        feats = {k: np.concatenate([r[0][k] for r in parts]) for k in parts[0][0]}
+        _store(c, feats, np.concatenate([r[1] for r in parts]),
+               np.concatenate([r[2] for r in parts]), c.nframes)
     s = Session(clips)
     s.settings = settings
     classify(s, settings)
@@ -535,7 +658,15 @@ def classify(s: Session, settings: Settings | None = None) -> None:
 
     snow_flag = raw_snow & ~faint
     snow = _smooth(snow_flag, s.frames_for(SMOOTH_S)) > 0.5
-    weak_raw = (~snow) & ((f["tear"] > TEAR_T) |
+    pic = ~snow
+    med_chroma = float(np.median(f["chroma"][pic])) if pic.any() else 0.0
+    if med_chroma >= 3.0:
+        # Analog receivers drop the colour when the signal gets weak, so colour loss is the
+        # most reliable sign of breakup (detailed scenes fooled the older noise/tearing test).
+        weak_raw = pic & ((f["chroma"] < max(COLOUR_LOSS_T, 0.2 * med_chroma)) | faint)
+    else:   # black & white camera / receiver: fall back to tearing and partial snow
+        s.notes.append("Footage has no colour: weak signal detected from tearing/partial snow.")
+        weak_raw = pic & ((f["tear"] > TEAR_T) |
                           ((f["snow"] > 0.30) & (f["snow"] < st.snow_cover)) | faint)
     # smooth only over frames that have a picture, so frames next to static aren't diluted
     wn = s.frames_for(WEAK_SMOOTH_S)
@@ -557,12 +688,9 @@ def classify(s: Session, settings: Settings | None = None) -> None:
         kind = "nosignal" if snow[a] else "signal"
         segs.append(Segment(kind, a, b, t0, t1, "keep"))
 
-    lb = s.frames_for(LOOKBACK_S)
     for i, sg in enumerate(segs):
         first, last = i == 0, i == len(segs) - 1
         if sg.kind == "signal":
-            sl = labels[sg.f0:sg.f1]
-            sg.weak_pct = 100.0 * float((sl == LABEL_WEAK).mean())
             sg.action = "keep"
             continue
 
@@ -575,13 +703,13 @@ def classify(s: Session, settings: Settings | None = None) -> None:
         # How did the picture end?  A VTX being unplugged goes from a clean
         # picture straight to snow.  Flying out of range (or a crash that
         # damages the antenna) degrades into weak, torn signal first.
-        a = max(segs[i - 1].f0, sg.f0 - lb)
+        a = max(segs[i - 1].f0, int(np.searchsorted(s.t, sg.t0 - LOOKBACK_S)))
         pre = labels[a:sg.f0]
         weak_frac = float((pre == LABEL_WEAK).mean()) if len(pre) else 0.0
         faded = weak_frac > 0.3
-        if not long_enough and not last:
-            sg.label = (f"Brief dropout ({sg.duration:.1f}s) after weak signal - picture came back"
-                        if faded else f"Brief dropout ({sg.duration:.1f}s) - picture came back")
+        if sg.duration < FLIGHT_GAP_S and not last:
+            sg.label = (f"Dropout ({sg.duration:.1f}s) after weak signal - picture came back"
+                        if faded else f"Dropout ({sg.duration:.1f}s) - picture came back")
             continue
         if faded:
             why = "signal faded first - out of range or crash?"
@@ -593,7 +721,99 @@ def classify(s: Session, settings: Settings | None = None) -> None:
         else:
             sg.label = f"No signal - {why}"
     s.segments = segs
+    _split_stats(s)
+    for sg in s.segments:
+        if sg.kind == "signal":
+            sg.weak_pct = 100.0 * float((labels[sg.f0:sg.f1] == LABEL_WEAK).mean())
     renumber_flights(s)
+
+
+def _corr_rows(m: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Pearson correlation of every row of m with the vector t."""
+    m = m.astype(np.float32)
+    mc = m - m.mean(axis=1, keepdims=True)
+    tc = (t - t.mean()).astype(np.float32)
+    den = np.sqrt((mc * mc).sum(axis=1) * float((tc * tc).sum())) + 1e-6
+    return (mc @ tc) / den
+
+
+def _find_stats_screens(s: Session) -> dict[int, int]:
+    """Find the Betaflight post-flight STATS screen shown between landing and unplugging.
+    Returns {index of the power-off segment: first frame of the STATS screen before it}."""
+    segs = s.segments
+    if s.osd is None or s.n == 0:
+        return {}
+    offs = [i for i, sg in enumerate(segs)
+            if sg.kind == "nosignal" and i > 0 and segs[i - 1].kind == "signal" and not sg.warn
+            and (sg.duration >= FLIGHT_GAP_S or i == len(segs) - 1)]
+    ends = {}
+    for i in offs:            # OSD map averaged over the last second before each power-off
+        a = max(segs[i - 1].f0, int(np.searchsorted(s.t, segs[i].t0 - 1.0)))
+        if segs[i].f0 - a >= 3:
+            ends[i] = s.osd[a:segs[i].f0].astype(np.float32).mean(axis=0)
+    if not ends:
+        return {}
+    builtin = np.frombuffer(bytes.fromhex(_STATS_TEMPLATE_HEX), np.uint8).astype(np.float32)
+    template, source = builtin, "built-in"
+    keys = list(ends)
+    if len(keys) >= 2:        # learn this pilot's STATS layout when several power-offs agree
+        e = np.array([ends[k] for k in keys])
+        cm = np.array([_corr_rows(e, row) for row in e])
+        mid = int(np.argmax((cm > STATS_MATCH_T).sum(axis=1)))
+        members = [keys[j] for j in range(len(keys)) if cm[mid, j] > STATS_MATCH_T]
+        learned = np.mean([ends[k] for k in members], axis=0)
+        # must look like a STATS screen, or a constant flight OSD could be "learned" instead
+        if len(members) >= 2 and _corr_rows(learned[None], builtin)[0] > 0.5:
+            template, source = learned, f"learned from {len(members)} power-offs"
+    found = {}
+    for i in keys:
+        if _corr_rows(ends[i][None], template)[0] <= STATS_MATCH_T:
+            continue
+        flight = segs[i - 1]
+        a = max(flight.f0, int(np.searchsorted(s.t, segs[i].t0 - STATS_MAX_S)))
+        r = _corr_rows(s.osd[a:segs[i].f0], template)
+        r = _smooth(r, 5)
+        # walk back from the power-off while the STATS screen is showing (allow brief dips)
+        g, below_since = len(r) - 1, None
+        start = len(r)
+        while g >= 0:
+            if r[g] > STATS_MATCH_T - 0.15:
+                start, below_since = g, None
+            else:
+                below_since = g if below_since is None else below_since
+                if s.t[a + below_since] - s.t[a + g] > 0.5:
+                    break
+            g -= 1
+        f_start = a + start
+        if f_start >= segs[i].f0 or s.t[segs[i].f0 - 1] - s.t[f_start] < 0.5:
+            continue
+        if f_start <= flight.f0 and flight.duration > 20.0:
+            continue          # a whole long "flight" can't be a STATS screen: don't touch it
+        found[i] = f_start
+    if found:
+        s.notes.append(f"Post-flight STATS screen found before {len(found)} power-off(s) (pattern: {source}).")
+    return found
+
+
+def _split_stats(s: Session) -> None:
+    """Give each post-flight STATS screen its own row (cut when trimming is on)."""
+    found = _find_stats_screens(s)
+    if not found:
+        return
+    out = []
+    for i, sg in enumerate(s.segments):
+        nxt = i + 1
+        if sg.kind == "signal" and nxt in found:
+            f_start = max(found[nxt], sg.f0)
+            if f_start > sg.f0:
+                out.append(Segment("signal", sg.f0, f_start, sg.t0, float(s.t[f_start]), "keep"))
+            st = Segment("stats", f_start, sg.f1, float(s.t[f_start]), sg.t1,
+                         "cut" if s.settings.trim_stats else "keep")
+            st.label = f"Post-flight STATS screen ({st.duration:.1f}s)"
+            out.append(st)
+        else:
+            out.append(sg)
+    s.segments = out
 
 
 def renumber_flights(s: Session) -> None:
@@ -603,8 +823,7 @@ def renumber_flights(s: Session) -> None:
         if sg.kind != "signal":
             continue
         prev = s.segments[i - 1] if i > 0 else None
-        if flight == 0 or (prev.kind == "nosignal" and
-                           (prev.action == "cut" or prev.duration >= s.settings.min_cut)):
+        if flight == 0 or (prev.kind == "nosignal" and prev.duration >= FLIGHT_GAP_S):
             flight += 1
             base = f"Flight {flight}"
         else:
@@ -710,7 +929,9 @@ def write_concat_list(pieces: list[Piece], path: str, tmpdir: str | None = None,
             src = _seekable_copy(c, tmpdir, cancel)
         lines.append(f"file {_concat_path(src)}")
         start = c.pts[pc.i0]
-        end = c.pts[pc.i1] + c.frame_dur if pc.i1 + 1 >= c.nframes else c.pts[pc.i1 + 1]
+        end = c.pts[pc.i1] + c.frame_dur
+        if pc.i1 + 1 < c.nframes:
+            end = min(c.pts[pc.i1 + 1], end)
         if pc.i0 > 0:
             lines.append(f"inpoint {start + eps:.6f}")
         if pc.i1 + 1 < c.nframes:
@@ -724,7 +945,7 @@ def write_concat_list(pieces: list[Piece], path: str, tmpdir: str | None = None,
 def write_chapters(s: Session, path: str) -> None:
     keep = s.keep_mask()
     out_t = s.output_times(keep)
-    total = float((s.fdur * keep).sum())
+    total = float(s.play_durations(keep).sum())
     starts = []
     segs = s.segments
     for i, sg in enumerate(segs):
@@ -938,7 +1159,7 @@ figcaption{{font-size:12px;color:#555;text-align:center}}
 </style></head><body>
 <h1>Signal-loss report</h1>
 <p>Video: <b>{html.escape(os.path.basename(video_path))}</b><br>
-Recorded footage: {fmt_time(s.duration)} &nbsp; Exported: {fmt_time(float((s.fdur * keep).sum()))}</p>
+Recorded footage: {fmt_time(s.duration)} &nbsp; Exported: {fmt_time(s.kept_duration())}</p>
 <p><b>Session time</b> = time across all original clips laid end to end. <b>Output time</b> = where it
 appears in the exported video. Rows marked &#9888; did not look like a normal power-off: the last clear
 frame and the seconds before it are shown, and a short lossless clip of the last 20 seconds is saved
@@ -1066,6 +1287,7 @@ def save_diagnostics(s: Session, zip_path: str, progress=None, cancel=None,
                    "info.txt          settings, clip details and the segment list\n"
                    "measurements.csv  every number the detector computed, for every frame\n"
                    "blocks.npy        per-frame noise level of each of the 8x6 regions (numpy float16)\n"
+                   "osd.npy           per-frame map of OSD-like text strokes, 32x18 (numpy uint8)\n"
                    "frames/           sample frames, exact copies of the originals where possible;\n"
                    "                  file names give session time, why the frame was picked and its label\n")
 
@@ -1087,6 +1309,10 @@ def save_diagnostics(s: Session, zip_path: str, progress=None, cancel=None,
             b = io.BytesIO()
             np.save(b, s.blocks.astype(np.float16))
             z.writestr("blocks.npy", b.getvalue())
+        if s.osd is not None:
+            b = io.BytesIO()
+            np.save(b, s.osd)
+            z.writestr("osd.npy", b.getvalue())
 
         # -- sample frames ------------------------------------------------------
         picks = _diag_picks(s)
@@ -1131,15 +1357,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=f"{APP_NAME} (command line)")
     ap.add_argument("files", nargs="+")
     ap.add_argument("-o", "--output", help="output video (.avi or .mkv); omit to only analyse")
-    ap.add_argument("--min-cut", type=float, default=5.0)
-    ap.add_argument("--pad", type=float, default=0.5)
+    d = Settings()
+    ap.add_argument("--min-cut", type=float, default=d.min_cut)
+    ap.add_argument("--pad", type=float, default=d.pad)
+    ap.add_argument("--cover", type=float, default=d.snow_cover * 100, help="snow coverage %% for static")
+    ap.add_argument("--no-trim-stats", action="store_true", help="keep the post-flight STATS screen")
     ap.add_argument("--no-faint-protect", action="store_true")
     ap.add_argument("--report", action="store_true", help="also write the signal-loss report")
     ap.add_argument("--dump", help="write per-frame measurements to this CSV (for tuning)")
     ap.add_argument("--diagnostics", help="write a diagnostics zip (measurements + sample frames)")
     a = ap.parse_args(argv)
     files = sorted(a.files, key=natural_key)
-    st = Settings(min_cut=a.min_cut, pad=a.pad, faint_protect=not a.no_faint_protect)
+    st = Settings(min_cut=a.min_cut, pad=a.pad, faint_protect=not a.no_faint_protect,
+                  snow_cover=a.cover / 100.0, trim_stats=not a.no_trim_stats)
 
     def prog(frac, msg):
         print(f"\r{msg:<45} {frac * 100:5.1f}%", end="", file=sys.stderr, flush=True)

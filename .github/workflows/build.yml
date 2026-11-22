@@ -2,10 +2,11 @@ name: Build Windows app
 
 # Every push to main builds and tests the program (download it from the run's
 # "Artifacts"). Publishing a GitHub Release (Releases -> Draft a new release ->
-# new tag such as v1.0.1 -> Publish) builds it again and attaches the
-# downloads to that release:
+# new tag such as v1.1.0 -> Publish) builds it again and attaches to the release:
 #   FPV-DVR-Stitcher.exe          single file, FFmpeg built in - just run it
-#   FPV-DVR-Stitcher-windows.zip  same program with FFmpeg as separate files (starts faster)
+#                                 (downloads the AI add-on the first time AI is used)
+#   FPV-DVR-Stitcher-windows.zip  same program + FFmpeg + AI add-on as separate files
+#   FPV-DVR-Stitcher-AI-addon.zip Real-ESRGAN upscaler + RIFE frame interpolation
 on:
   push:
     branches: [main]
@@ -20,7 +21,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
 
@@ -45,9 +46,54 @@ jobs:
           $lic = Get-ChildItem -Recurse ffmpeg_dl -Filter 'LICENSE*' | Select-Object -First 1
           if ($lic) { Copy-Item $lic.FullName 'ffmpeg\FFMPEG-LICENSE.txt' }
           .\ffmpeg\ffmpeg.exe -hide_banner -version | Select-Object -First 1
-          Get-ChildItem ffmpeg | Format-Table Name, Length
 
-      - name: Self-test (static detection + lossless export)
+      - name: Cache AI tool downloads
+        uses: actions/cache@v4
+        with:
+          path: ai_dl
+          key: ai-upstream-realesrgan-20220424-rife-20221029
+
+      - name: Assemble AI add-on (Real-ESRGAN + RIFE)
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force ai_dl | Out-Null
+          if (-not (Test-Path 'ai_dl\realesrgan.zip')) {
+            Invoke-WebRequest 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-windows.zip' -OutFile 'ai_dl\realesrgan.zip'
+          }
+          if (-not (Test-Path 'ai_dl\rife.zip')) {
+            Invoke-WebRequest 'https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip' -OutFile 'ai_dl\rife.zip'
+          }
+          Expand-Archive 'ai_dl\realesrgan.zip' -DestinationPath 'ai_x\realesrgan' -Force
+          Expand-Archive 'ai_dl\rife.zip' -DestinationPath 'ai_x\rife' -Force
+          # only the two programs and the models the app uses
+          $e = (Get-ChildItem -Recurse 'ai_x\realesrgan' -Filter realesrgan-ncnn-vulkan.exe | Select-Object -First 1).DirectoryName
+          New-Item -ItemType Directory -Force 'ai\realesrgan\models' | Out-Null
+          Copy-Item "$e\realesrgan-ncnn-vulkan.exe" 'ai\realesrgan'
+          Get-ChildItem $e -Filter *.dll | Copy-Item -Destination 'ai\realesrgan'
+          foreach ($m in 'realesrgan-x4plus', 'realesr-animevideov3-x4') {
+            Copy-Item "$e\models\$m.param", "$e\models\$m.bin" 'ai\realesrgan\models'
+          }
+          $r = (Get-ChildItem -Recurse 'ai_x\rife' -Filter rife-ncnn-vulkan.exe | Select-Object -First 1).DirectoryName
+          New-Item -ItemType Directory -Force 'ai\rife' | Out-Null
+          Copy-Item "$r\rife-ncnn-vulkan.exe" 'ai\rife'
+          Get-ChildItem $r -Filter *.dll | Copy-Item -Destination 'ai\rife'
+          Copy-Item "$r\rife-v4.6" 'ai\rife' -Recurse
+          if (Test-Path "$r\LICENSE") { Copy-Item "$r\LICENSE" 'ai\rife\LICENSE.txt' }
+          Set-Content 'ai\NOTICE.txt' -Value @(
+            'AI add-on for FPV DVR Stitcher',
+            '',
+            'realesrgan-ncnn-vulkan - Real-ESRGAN upscaler (BSD-3-Clause) - https://github.com/xinntao/Real-ESRGAN',
+            'rife-ncnn-vulkan - RIFE frame interpolation (MIT) - https://github.com/nihui/rife-ncnn-vulkan',
+            'ncnn - neural network runtime (BSD-3-Clause) - https://github.com/Tencent/ncnn'
+          )
+          foreach ($p in 'ai\realesrgan\realesrgan-ncnn-vulkan.exe', 'ai\realesrgan\models\realesrgan-x4plus.bin',
+                         'ai\rife\rife-ncnn-vulkan.exe', 'ai\rife\rife-v4.6') {
+            if (-not (Test-Path $p)) { throw "AI add-on is missing $p" }
+          }
+          Compress-Archive -Path 'ai' -DestinationPath 'FPV-DVR-Stitcher-AI-addon.zip' -Force
+          Get-Item 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
+
+      - name: Self-test (detection, lossless export, diagnostics, enhance)
         run: python tests/smoke_test.py test_clips
 
       - name: Build .exe (zip version, FFmpeg alongside)
@@ -66,13 +112,14 @@ jobs:
           New-Item -ItemType Directory -Force $pkg | Out-Null
           Copy-Item 'dist\FPV DVR Stitcher.exe', 'ffmpeg\ffmpeg.exe', 'ffmpeg\ffprobe.exe', 'README.txt' $pkg
           if (Test-Path 'ffmpeg\FFMPEG-LICENSE.txt') { Copy-Item 'ffmpeg\FFMPEG-LICENSE.txt' $pkg }
+          Copy-Item 'ai' $pkg -Recurse
           Compress-Archive -Path $pkg -DestinationPath 'FPV-DVR-Stitcher-windows.zip' -Force
           # the single-file .exe is tested from an empty folder so it must use its built-in FFmpeg
           New-Item -ItemType Directory -Force standalone | Out-Null
           Copy-Item 'dist\FPV-DVR-Stitcher.exe' standalone
-          Get-ChildItem $pkg, standalone, 'FPV-DVR-Stitcher-windows.zip' | Format-Table FullName, Length
+          Get-ChildItem 'standalone\FPV-DVR-Stitcher.exe', 'FPV-DVR-Stitcher-windows.zip', 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
 
-      - name: Test both .exe files (open, find FFmpeg, analyse + export)
+      - name: Test both .exe files (open, find FFmpeg, analyse, export, enhance)
         run: |
           function Test-Exe([string]$exePath, [string]$name) {
             $report = Join-Path $PWD "selftest_$name.txt"
@@ -80,7 +127,7 @@ jobs:
             $argList += Get-ChildItem test_clips -Filter *.AVI | Sort-Object Name | ForEach-Object { '"' + $_.FullName + '"' }
             $t = Get-Date
             $p = Start-Process -FilePath $exePath -ArgumentList $argList -PassThru
-            if (-not $p.WaitForExit(300000)) {
+            if (-not $p.WaitForExit(600000)) {
               Get-Process 'FPV DVR Stitcher', 'FPV-DVR-Stitcher' -ErrorAction SilentlyContinue | Stop-Process -Force
               throw "$name did not finish its self-test (crashed or hung)."
             }
@@ -94,6 +141,9 @@ jobs:
           if (-not (Select-String -Path 'selftest_single.txt' -Pattern '^ffmpeg: .*_MEI' -Quiet)) {
             throw 'The single-file .exe did not use its built-in FFmpeg.'
           }
+          if (-not (Select-String -Path 'selftest_zip.txt' -Pattern '^AI add-on: found' -Quiet)) {
+            throw 'The zip version did not find its AI add-on.'
+          }
 
       - uses: actions/upload-artifact@v5
         with:
@@ -105,8 +155,16 @@ jobs:
           name: FPV-DVR-Stitcher-windows
           path: FPV-DVR-Stitcher/
 
+      - uses: actions/upload-artifact@v5
+        with:
+          name: FPV-DVR-Stitcher-AI-addon
+          path: ai/
+
       - name: Attach downloads to the release
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" 'standalone\FPV-DVR-Stitcher.exe' 'FPV-DVR-Stitcher-windows.zip' --clobber --repo "${{ github.repository }}"
+        run: >-
+          gh release upload "${{ github.event.release.tag_name }}"
+          'standalone\FPV-DVR-Stitcher.exe' 'FPV-DVR-Stitcher-windows.zip' 'FPV-DVR-Stitcher-AI-addon.zip'
+          --clobber --repo "${{ github.repository }}"

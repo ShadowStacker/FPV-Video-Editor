@@ -17,3 +17,8 @@ build_standalone/
 FPV-DVR-Stitcher.exe
 selftest_diagnostics.zip
 *_diagnostics.zip
+ai/
+ai_dl/
+ai_x/
+FPV-DVR-Stitcher-AI-addon.zip
+selftest_youtube.mp4

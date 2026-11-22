@@ -19,6 +19,8 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 
 import dvr_core as dc
+import enhance as en
+import enhance_ui
 
 VIDEO_EXT = (".avi", ".mp4", ".mov", ".mkv", ".ts", ".m4v", ".3gp", ".mpg", ".mpeg", ".wmv")
 
@@ -27,6 +29,7 @@ COL_WEAK = "#f0a020"
 COL_SNOW = "#c8352b"
 COL_KEEP = "#2f6fd6"
 COL_CUT = "#d9d9d9"
+COL_STATS = "#8e6cc9"
 COL_BG = "#ffffff"
 
 
@@ -53,6 +56,11 @@ class App:
         self.thumb = None
         self.sel_seg: int | None = None
         self.thumb_req = 0
+        self.preview_t: float | None = None          # moment last shown in the preview
+        self.enh_settings = en.EnhanceSettings()
+        self.v_fps60 = tk.BooleanVar(value=False)    # "Smooth 60 fps" (menu + Enhance window)
+        self.enh_dialog = None
+        self.enh_busy = False
 
         style = ttk.Style()
         try:
@@ -72,8 +80,40 @@ class App:
         self.root.after(300, self._check_ffmpeg)
 
     # ------------------------------------------------------------------ UI
+    def _build_menu(self):
+        mb = tk.Menu(self.root)
+        fm = tk.Menu(mb, tearoff=0)
+        fm.add_command(label="Add files...", command=self.add_files)
+        fm.add_command(label="Add folder...", command=self.add_folder)
+        fm.add_separator()
+        fm.add_command(label="Exit", command=self.root.destroy)
+        mb.add_cascade(label="File", menu=fm)
+        em = tk.Menu(mb, tearoff=0)
+        em.add_command(label="Enhance for YouTube...", command=self.open_enhance)
+        em.add_checkbutton(label="Smooth 60 fps (AI frame interpolation)", variable=self.v_fps60,
+                           onvalue=True, offvalue=False)
+        em.add_separator()
+        em.add_command(label="Download AI add-on...", command=self.download_ai)
+        mb.add_cascade(label="Enhance", menu=em)
+        hm = tk.Menu(mb, tearoff=0)
+        hm.add_command(label="Save diagnostics...", command=self.save_diag)
+        hm.add_command(label="About", command=lambda: messagebox.showinfo(
+            dc.APP_NAME, f"{dc.APP_NAME} {dc.APP_VERSION}\n\nhttps://github.com/ShadowStacker/FPV-Video-Editor"))
+        mb.add_cascade(label="Help", menu=hm)
+        self.menu_enh, self.menu_help = em, hm
+        self.root.config(menu=mb)
+
+    def _menu_states(self):
+        ready = "normal" if (self.session is not None and not self.busy and not self.enh_busy) else "disabled"
+        try:
+            self.menu_enh.entryconfigure(0, state=ready)
+            self.menu_help.entryconfigure(0, state=ready)
+        except (tk.TclError, AttributeError):
+            pass
+
     def _build(self):
         r = self.root
+        self._build_menu()
         top = ttk.Frame(r, padding=(10, 8, 10, 0))
         top.pack(fill="x")
         ttk.Button(top, text="Add files...", command=self.add_files).pack(side="left")
@@ -97,15 +137,17 @@ class App:
         # settings
         sf = ttk.LabelFrame(mid, text="Settings", padding=8)
         sf.pack(side="left", fill="y", padx=8)
-        self.v_min = tk.StringVar(value="5")
-        self.v_pad = tk.StringVar(value="0.5")
-        self.v_cover = tk.StringVar(value=str(int(dc.SNOW_COVER_T * 100)))
+        defaults = dc.Settings()
+        self.v_min = tk.StringVar(value=f"{defaults.min_cut:g}")
+        self.v_pad = tk.StringVar(value=f"{defaults.pad:.1f}")
+        self.v_cover = tk.StringVar(value=f"{defaults.snow_cover * 100:.0f}")
         self.v_fmt = tk.StringVar(value=".avi")
-        self.v_report = tk.BooleanVar(value=True)
-        self.v_faint = tk.BooleanVar(value=True)
+        self.v_report = tk.BooleanVar(value=False)
+        self.v_faint = tk.BooleanVar(value=defaults.faint_protect)
+        self.v_trim = tk.BooleanVar(value=defaults.trim_stats)
         row = 0
         ttk.Label(sf, text="Cut static longer than").grid(row=row, column=0, sticky="w")
-        e = ttk.Spinbox(sf, from_=1, to=120, increment=1, width=6, textvariable=self.v_min,
+        e = ttk.Spinbox(sf, from_=0.5, to=120, increment=0.5, width=6, textvariable=self.v_min,
                         command=self.reapply)
         e.grid(row=row, column=1, padx=4)
         e.bind("<Return>", lambda ev: self.reapply())
@@ -113,7 +155,7 @@ class App:
         ttk.Label(sf, text="seconds").grid(row=row, column=2, sticky="w")
         row += 1
         ttk.Label(sf, text="Keep static at each cut").grid(row=row, column=0, sticky="w")
-        e = ttk.Spinbox(sf, from_=0, to=5, increment=0.25, width=6, textvariable=self.v_pad,
+        e = ttk.Spinbox(sf, from_=0, to=5, increment=0.1, width=6, textvariable=self.v_pad,
                         command=self.reapply)
         e.grid(row=row, column=1, padx=4)
         e.bind("<Return>", lambda ev: self.reapply())
@@ -131,6 +173,10 @@ class App:
         ttk.Checkbutton(sf, text="Protect faint picture hidden in static (crash finding)",
                         variable=self.v_faint, command=self.reapply).grid(row=row, column=0, columnspan=3,
                                                                            sticky="w", pady=(4, 0))
+        row += 1
+        ttk.Checkbutton(sf, text="Trim post-flight STATS screen (landed -> unplugged)",
+                        variable=self.v_trim, command=self.reapply).grid(row=row, column=0, columnspan=3,
+                                                                          sticky="w")
         row += 1
         ttk.Separator(sf).grid(row=row, column=0, columnspan=3, sticky="ew", pady=6)
         row += 1
@@ -166,8 +212,9 @@ class App:
         self.btn_ex.pack(side="left", padx=8)
         self.btn_cancel = ttk.Button(bar, text="Cancel", command=self.do_cancel, state="disabled")
         self.btn_cancel.pack(side="left")
-        self.btn_diag = ttk.Button(bar, text="Save diagnostics...", command=self.save_diag, state="disabled")
-        self.btn_diag.pack(side="right")
+        self.btn_enh = ttk.Button(bar, text="3.  Enhance for YouTube...", style="Big.TButton",
+                                  command=self.open_enhance, state="disabled")
+        self.btn_enh.pack(side="left", padx=(0, 8), before=self.btn_cancel)
         self.summary = ttk.Label(bar, text="", font=("Segoe UI", 10, "bold"))
         self.summary.pack(side="left", padx=14)
 
@@ -181,7 +228,7 @@ class App:
         leg = ttk.Frame(tf)
         leg.pack(fill="x", pady=(2, 0))
         for col, txt in ((COL_GOOD, "Good signal"), (COL_WEAK, "Weak / breaking up (always kept)"),
-                         (COL_SNOW, "No signal (static)"), (COL_KEEP, "Exported"), (COL_CUT, "Cut out")):
+                         (COL_SNOW, "No signal (static)"), (COL_STATS, "STATS screen"), (COL_KEEP, "Exported"), (COL_CUT, "Cut out")):
             c = tk.Canvas(leg, width=14, height=14, highlightthickness=0)
             c.create_rectangle(1, 1, 13, 13, fill=col, outline="#888888")
             c.pack(side="left", padx=(8, 3))
@@ -238,7 +285,8 @@ class App:
         self.session = None
         self.sel_seg = None
         self.btn_ex.configure(state="disabled")
-        self.btn_diag.configure(state="disabled")
+        self.btn_enh.configure(state="disabled")
+        self._menu_states()
         self.tv.delete(*self.tv.get_children())
         self.summary.configure(text="")
         self.draw_timeline()
@@ -282,18 +330,20 @@ class App:
                 x = d
             x = min(hi, max(lo, x))
             return x
-        return dc.Settings(min_cut=num(self.v_min, 5.0, 0.5, 600),
-                           pad=num(self.v_pad, 0.5, 0.0, 10),
+        d = dc.Settings()
+        return dc.Settings(min_cut=num(self.v_min, d.min_cut, 0.5, 600),
+                           pad=num(self.v_pad, d.pad, 0.0, 10),
                            faint_protect=bool(self.v_faint.get()),
-                           snow_cover=num(self.v_cover, 85, 30, 100) / 100.0)
+                           snow_cover=num(self.v_cover, d.snow_cover * 100, 30, 100) / 100.0,
+                           trim_stats=bool(self.v_trim.get()))
 
     def reapply(self):
         if self.session is None or self.busy:
             return
         st = self._settings()
         old = self.session.settings
-        if (st.min_cut, st.pad, st.faint_protect, st.snow_cover) == \
-                (old.min_cut, old.pad, old.faint_protect, old.snow_cover):
+        if (st.min_cut, st.pad, st.faint_protect, st.snow_cover, st.trim_stats) == \
+                (old.min_cut, old.pad, old.faint_protect, old.snow_cover, old.trim_stats):
             return
         dc.classify(self.session, st)
         self.fill_table()
@@ -305,7 +355,8 @@ class App:
         self.busy = busy
         self.btn_an.configure(state="disabled" if busy else "normal")
         self.btn_ex.configure(state="disabled" if busy or self.session is None else "normal")
-        self.btn_diag.configure(state="disabled" if busy or self.session is None else "normal")
+        self.btn_enh.configure(state="disabled" if busy or self.session is None else "normal")
+        self._menu_states()
         self.btn_cancel.configure(state="normal" if busy else "disabled")
         self.root.configure(cursor="watch" if busy else "")
 
@@ -340,6 +391,34 @@ class App:
             except Exception as e:
                 self.q.put(("error", f"{e}", traceback.format_exc()))
         threading.Thread(target=work, daemon=True).start()
+
+    def open_enhance(self):
+        if self.session is None or self.busy:
+            messagebox.showinfo(dc.APP_NAME, "Analyse your clips first.")
+            return
+        if self.enh_dialog is not None and self.enh_dialog.winfo_exists():
+            self.enh_dialog.lift()
+            return
+        self.enh_dialog = enhance_ui.EnhanceDialog(self)
+
+    def lock_for_enhance(self, busy: bool):
+        """While the Enhance window is working, the session must not change underneath it."""
+        self.enh_busy = busy
+        st = "disabled" if busy else "normal"
+        self.btn_an.configure(state=st)
+        self.btn_ex.configure(state="disabled" if busy or self.session is None else "normal")
+        self._menu_states()
+
+    def download_ai(self):
+        if en.ai_installed():
+            messagebox.showinfo(dc.APP_NAME, "The AI add-on is already installed.")
+            return
+        if self.session is None:
+            messagebox.showinfo(dc.APP_NAME, "Open the Enhance window (after Analyse) to download the AI add-on.")
+            return
+        self.open_enhance()
+        if self.enh_dialog is not None:
+            self.enh_dialog.download_ai()
 
     def save_diag(self):
         """Measurements + sample frames in one zip, for tuning the detector on this footage."""
@@ -566,6 +645,7 @@ class App:
             return
         self.thumb_req += 1
         req = self.thumb_req
+        self.preview_t = float(t)
         c, ts = s.locate(t)
         cap = f"{caption}\n{os.path.basename(c.path)} @ {dc.fmt_time(ts, True)}"
 
@@ -636,6 +716,11 @@ class App:
             labs = mx.astype(np.int8)
         keep = s.keep_mask()[gi]
         self._draw_runs(labs, x0, y_sig, h, {0: COL_GOOD, 1: COL_WEAK, 2: COL_SNOW})
+        for sg in s.segments:                  # post-flight STATS screens in their own colour
+            if sg.kind == "stats":
+                xa = x0 + sg.t0 / dur * npx
+                cv.create_rectangle(xa, y_sig, max(xa + 1, x0 + sg.t1 / dur * npx), y_sig + h,
+                                    fill=COL_STATS, outline="")
         self._draw_runs(keep.astype(np.int8), x0, y_exp, h, {1: COL_KEEP, 0: COL_CUT})
         # file boundaries
         for c in s.clips[1:]:
@@ -692,8 +777,16 @@ def selftest(report_path: str, clips: list[str]) -> int:
             dz = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_diagnostics.zip")
             d = dc.save_diagnostics(s, dz)
             lines.append(f"diagnostics: {d['size']} bytes, {d['frames']} frames -> {dz}")
+            es = en.EnhanceSettings()
+            en.apply_preset(es, "quick")
+            es.height = 1080
+            ye = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_youtube.mp4")
+            t0 = next(g.t0 for g in s.segments if g.kind == "signal")
+            r = en.enhance(s, ye, es, t_range=(t0, t0 + 4.0))
+            lines.append(f"enhance: {r['size'][0]}x{r['size'][1]} via {r['encoder']} -> {ye}")
+            lines.append(f"AI add-on: {'found' if en.ai_installed() else 'not installed'}")
             ok = (os.path.getsize(out) > 0 and sum(1 for g in s.segments if g.action == "cut") > 0
-                  and d["frames"] > 0)
+                  and d["frames"] > 0 and os.path.getsize(ye) > 0)
         root.destroy()
     except Exception:
         ok = False
