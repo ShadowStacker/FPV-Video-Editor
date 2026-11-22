@@ -1,17 +1,21 @@
 name: Build Windows app
 
-# Every push to main builds and tests the .exe (download it from the run's
-# "Artifacts"). Pushing a version tag such as v1.0.1 also publishes it as a
-# GitHub Release with the ready-to-use zip attached.
+# Every push to main builds and tests the program (download it from the run's
+# "Artifacts"). Publishing a GitHub Release (Releases -> Draft a new release ->
+# new tag such as v1.0.1 -> Publish) builds it again and attaches the
+# downloads to that release:
+#   FPV-DVR-Stitcher.exe          single file, FFmpeg built in - just run it
+#   FPV-DVR-Stitcher-windows.zip  same program with FFmpeg as separate files (starts faster)
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  release:
+    types: [published]
 
 permissions:
-  contents: write   # needed to attach the zip to a Release
+  contents: write   # needed to attach the downloads to a Release
 
 jobs:
   build:
@@ -41,50 +45,68 @@ jobs:
           $lic = Get-ChildItem -Recurse ffmpeg_dl -Filter 'LICENSE*' | Select-Object -First 1
           if ($lic) { Copy-Item $lic.FullName 'ffmpeg\FFMPEG-LICENSE.txt' }
           .\ffmpeg\ffmpeg.exe -hide_banner -version | Select-Object -First 1
+          Get-ChildItem ffmpeg | Format-Table Name, Length
 
       - name: Self-test (static detection + lossless export)
         run: python tests/smoke_test.py test_clips
 
-      - name: Build .exe
+      - name: Build .exe (zip version, FFmpeg alongside)
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV DVR Stitcher" fpv_dvr_stitcher.py
 
-      - name: Assemble download folder
+      - name: Build .exe (single-file version, FFmpeg built in)
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV-DVR-Stitcher"
+          --workpath build_standalone
+          --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" --add-binary "ffmpeg\ffprobe.exe;ffmpeg"
+          fpv_dvr_stitcher.py
+
+      - name: Assemble downloads
         run: |
           $pkg = 'FPV-DVR-Stitcher'
           New-Item -ItemType Directory -Force $pkg | Out-Null
           Copy-Item 'dist\FPV DVR Stitcher.exe', 'ffmpeg\ffmpeg.exe', 'ffmpeg\ffprobe.exe', 'README.txt' $pkg
           if (Test-Path 'ffmpeg\FFMPEG-LICENSE.txt') { Copy-Item 'ffmpeg\FFMPEG-LICENSE.txt' $pkg }
-          Get-ChildItem $pkg | Format-Table Name, Length
+          Compress-Archive -Path $pkg -DestinationPath 'FPV-DVR-Stitcher-windows.zip' -Force
+          # the single-file .exe is tested from an empty folder so it must use its built-in FFmpeg
+          New-Item -ItemType Directory -Force standalone | Out-Null
+          Copy-Item 'dist\FPV-DVR-Stitcher.exe' standalone
+          Get-ChildItem $pkg, standalone, 'FPV-DVR-Stitcher-windows.zip' | Format-Table FullName, Length
 
-      - name: Test the built .exe (opens, finds FFmpeg, analyses + exports)
+      - name: Test both .exe files (open, find FFmpeg, analyse + export)
         run: |
-          $report = Join-Path $PWD 'selftest.txt'
-          $argList = @('--selftest', ('"' + $report + '"'))
-          $argList += Get-ChildItem test_clips -Filter *.AVI | Sort-Object Name | ForEach-Object { '"' + $_.FullName + '"' }
-          $p = Start-Process -FilePath 'FPV-DVR-Stitcher\FPV DVR Stitcher.exe' -ArgumentList $argList -PassThru
-          if (-not $p.WaitForExit(180000)) {
-            Get-Process 'FPV DVR Stitcher' -ErrorAction SilentlyContinue | Stop-Process -Force
-            throw 'The built .exe did not finish its self-test (crashed or hung).'
+          function Test-Exe([string]$exePath, [string]$name) {
+            $report = Join-Path $PWD "selftest_$name.txt"
+            $argList = @('--selftest', ('"' + $report + '"'))
+            $argList += Get-ChildItem test_clips -Filter *.AVI | Sort-Object Name | ForEach-Object { '"' + $_.FullName + '"' }
+            $t = Get-Date
+            $p = Start-Process -FilePath $exePath -ArgumentList $argList -PassThru
+            if (-not $p.WaitForExit(300000)) {
+              Get-Process 'FPV DVR Stitcher', 'FPV-DVR-Stitcher' -ErrorAction SilentlyContinue | Stop-Process -Force
+              throw "$name did not finish its self-test (crashed or hung)."
+            }
+            "--- $name finished in $([int]((Get-Date) - $t).TotalSeconds) s"
+            if (-not (Test-Path $report)) { throw "$name did not write its self-test report." }
+            Get-Content $report
+            if (-not (Select-String -Path $report -Pattern 'SELFTEST OK' -Quiet)) { throw "$name failed its self-test." }
           }
-          if (-not (Test-Path $report)) { throw 'The built .exe did not write its self-test report.' }
-          Get-Content $report
-          if (-not (Select-String -Path $report -Pattern 'SELFTEST OK' -Quiet)) { throw 'The built .exe failed its self-test.' }
+          Test-Exe 'FPV-DVR-Stitcher\FPV DVR Stitcher.exe' 'zip'
+          Test-Exe 'standalone\FPV-DVR-Stitcher.exe' 'single'
+          if (-not (Select-String -Path 'selftest_single.txt' -Pattern '^ffmpeg: .*_MEI' -Quiet)) {
+            throw 'The single-file .exe did not use its built-in FFmpeg.'
+          }
 
-      - name: Zip
-        run: Compress-Archive -Path FPV-DVR-Stitcher -DestinationPath FPV-DVR-Stitcher-windows.zip -Force
+      - uses: actions/upload-artifact@v5
+        with:
+          name: FPV-DVR-Stitcher-single-exe
+          path: standalone/FPV-DVR-Stitcher.exe
 
       - uses: actions/upload-artifact@v5
         with:
           name: FPV-DVR-Stitcher-windows
           path: FPV-DVR-Stitcher/
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: FPV-DVR-Stitcher-windows.zip
-          body: |
-            **Download `FPV-DVR-Stitcher-windows.zip` below**, unzip it anywhere and run `FPV DVR Stitcher.exe`.
-            Keep `ffmpeg.exe` and `ffprobe.exe` in the same folder. No install or Python needed.
-
-            Windows SmartScreen may warn the first time (the .exe isn't code-signed): click **More info -> Run anyway**.
+      - name: Attach downloads to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" 'standalone\FPV-DVR-Stitcher.exe' 'FPV-DVR-Stitcher-windows.zip' --clobber --repo "${{ github.repository }}"

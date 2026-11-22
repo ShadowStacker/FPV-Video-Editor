@@ -63,7 +63,9 @@ def find_tool(name: str) -> str:
     exe = name + (".exe" if os.name == "nt" else "")
     dirs = []
     if getattr(sys, "frozen", False):
-        dirs.append(os.path.dirname(sys.executable))
+        dirs.append(os.path.dirname(sys.executable))   # ffmpeg.exe placed next to the .exe
+        if getattr(sys, "_MEIPASS", None):
+            dirs.append(sys._MEIPASS)                  # ffmpeg built into the single-file .exe
     dirs.append(os.path.dirname(os.path.abspath(__file__)))
     for d in dirs:
         for sub in ("", "ffmpeg", os.path.join("ffmpeg", "bin")):

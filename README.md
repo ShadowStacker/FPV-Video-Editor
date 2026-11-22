@@ -18,16 +18,22 @@ goggles or handheld receiver recorded during a session, and it:
 
 ## Download
 
-Go to **[Releases](../../releases/latest)**, download `FPV-DVR-Stitcher-windows.zip`,
-unzip it anywhere and run `FPV DVR Stitcher.exe`. Keep `ffmpeg.exe` and
-`ffprobe.exe` in the same folder. No install, no Python needed.
+Go to **[Releases](../../releases/latest)** and download either file:
 
-Windows SmartScreen may warn the first time because the .exe isn't code-signed:
-click **More info -> Run anyway**.
+- **`FPV-DVR-Stitcher.exe`**: a single file with everything built in. Download it and run it.
+  It takes a few seconds to open because it unpacks FFmpeg each time.
+- **`FPV-DVR-Stitcher-windows.zip`**: the same program with FFmpeg as separate files. It
+  starts faster. Unzip it and run `FPV DVR Stitcher.exe`, keeping `ffmpeg.exe` and
+  `ffprobe.exe` next to it.
 
-Every push to `main` also builds the .exe automatically. It can be downloaded
-from the **Artifacts** section of the latest run on the
-[Actions](../../actions) tab (you need to be signed in to GitHub).
+No install and no Python needed. Windows SmartScreen may warn the first time because
+the .exe isn't code-signed: click **More info -> Run anyway**.
+
+Every push to `main` also builds both automatically. They can be downloaded from the
+**Artifacts** section of the latest run on the [Actions](../../actions) tab (you need
+to be signed in to GitHub). To publish a new version, go to **Releases -> Draft a new release**,
+create a new tag such as `v1.0.1` and click **Publish**. The build attaches both downloads
+to the release within a few minutes.
 
 ## Using it
 
@@ -78,8 +84,8 @@ Files:
 | `dvr_core.py` | Analysis, classification, lossless export (FFmpeg stream copy), report |
 | `fpv_dvr_stitcher.py` | The Tkinter desktop app |
 | `tests/smoke_test.py` | End-to-end self-test |
-| `.github/workflows/build.yml` | Windows build: test, PyInstaller .exe, test the .exe, zip, release |
+| `.github/workflows/build.yml` | Windows build: test, build both .exe versions, test them, attach to releases |
 
 The bundled `ffmpeg.exe`/`ffprobe.exe` come from
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds) (LGPL build). Their
-license is included in the download as `FFMPEG-LICENSE.txt`.
+license is included in the zip download as `FFMPEG-LICENSE.txt`.

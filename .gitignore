@@ -12,3 +12,6 @@ selftest*.txt
 selftest_export.*
 FPV-DVR-Stitcher/
 FPV-DVR-Stitcher-windows.zip
+standalone/
+build_standalone/
+FPV-DVR-Stitcher.exe

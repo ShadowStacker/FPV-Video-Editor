@@ -14,11 +14,13 @@ seconds to export.
 
 GETTING IT (Windows 10/11)
 --------------------------
-Easiest: download FPV-DVR-Stitcher-windows.zip from
-    https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest
-unzip it anywhere and run "FPV DVR Stitcher.exe". Keep ffmpeg.exe and
-ffprobe.exe in the same folder as the .exe. No install or Python needed.
-You can make a desktop shortcut to the .exe.
+Download from  https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest
+  FPV-DVR-Stitcher.exe          One file with everything built in - just run
+                                it. Takes a few seconds to open.
+  FPV-DVR-Stitcher-windows.zip  Same program, starts faster. Unzip and run
+                                "FPV DVR Stitcher.exe", keeping ffmpeg.exe and
+                                ffprobe.exe in the same folder as it.
+No install or Python needed. You can make a desktop shortcut to the .exe.
 
 Windows SmartScreen may warn the first time (the .exe isn't code-signed):
 click "More info" -> "Run anyway".
