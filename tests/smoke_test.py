@@ -33,6 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import numpy as np  # noqa: E402
 
+os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="dvr_appdata_")   # keep test runs out of real settings
 import dvr_core as dc  # noqa: E402
 import enhance as en  # noqa: E402
 
@@ -246,28 +247,51 @@ def main() -> int:
             check(exact == len(frames), f"sample frames byte-identical to the originals ({exact}/{len(frames)})")
 
         # ---- enhance for YouTube -------------------------------------------
-        print("Enhance (quick, no AI)...")
+        print("Enhance (quick, no AI, parallel parts)...")
         es = en.EnhanceSettings()
         en.apply_preset(es, "quick")
         es.height = 1080                      # smaller than the default 1440p to keep the test quick
+        check(es.overlap and es.all_cores and es.gpu_denoise and en.match_preset(es) == "quick",
+              "Quick preset with all speed options on")
+        e = en.estimate(s, es)
+        check(e["total"] > 0 and e["frames"] > 0, f"time estimate works ({en.fmt_minutes(e['total'])})")
         r = en.enhance(s, os.path.join(d, "youtube.mp4"), es)
         p = probe(r["path"])
         check(p["w"] == 1440 and p["h"] == 1080 and abs(p["dur"] - s.kept_duration()) < 0.2,
-              f"enhanced video {p['w']}x{p['h']}, {p['dur']:.2f}s (kept {s.kept_duration():.2f}s) via {r['encoder']}")
+              f"enhanced video {p['w']}x{p['h']}, {p['dur']:.2f}s (kept {s.kept_duration():.2f}s) via {r['encoder']}, "
+              f"{en.quick_parts(es, en.pick_encoder())} parts")
         png = en.compare_frame(s, s.segments[1].t0 + 2, es)
         check(png[:8] == b"\x89PNG\r\n\x1a\n", "before/after comparison picture made")
+        back = en.settings_from_dict(en.settings_dict(es))
+        check(back == es, "enhance settings survive saving and loading")
+
+        if en.gpu_denoise_works():
+            es.denoise = 3
+            t0 = s.segments[1].t0 + 1
+            r = en.enhance(s, os.path.join(d, "youtube_gpudn.mp4"), es, t_range=(t0, t0 + 3))
+            p = probe(r["path"])
+            check(r["gpu_denoise"] and abs(p["dur"] - 3) < 0.15, f"graphics-card denoise: {p['dur']:.2f}s")
+        else:
+            print("  skip  graphics-card denoise (no Vulkan device here; the processor is used instead)")
 
         if os.name != "nt":
             print("Enhance (AI upscale + 60 fps, stand-in AI tools)...")
             os.environ["FPV_AI_DIR"] = fake_ai_tools(d)
-            es = en.EnhanceSettings()
-            en.apply_preset(es, "youtube")
-            es.fps60, es.height = True, 1080
+            old_chunk, en.CHUNK_FRAMES = en.CHUNK_FRAMES, 90     # several batches, so the overlap is exercised
             t0 = s.segments[1].t0 + 1
-            r = en.enhance(s, os.path.join(d, "youtube_ai.mp4"), es, t_range=(t0, t0 + 4))
-            p = probe(r["path"])
-            check(p["w"] == 1440 and p["h"] == 1080 and abs(p["fps"] - 60) < 0.01 and abs(p["dur"] - 4) < 0.15,
-                  f"AI path: {p['w']}x{p['h']} at {p['fps']:.0f} fps, {p['dur']:.2f}s")
+            for name, kw in (("overlapping", {}), ("one step at a time", {"overlap": False, "all_cores": False}),
+                             ("AI at 1080p, Best", {"ai_res": "1080", "preset": "best"})):
+                es = en.EnhanceSettings()
+                en.apply_preset(es, kw.pop("preset", "balanced"))
+                es.fps60, es.height = True, 1440
+                for k, v in kw.items():
+                    setattr(es, k, v)
+                r = en.enhance(s, os.path.join(d, "youtube_ai.mp4"), es, t_range=(t0, t0 + 25))
+                p = probe(r["path"])
+                want = r["duration"]
+                check(p["w"] == 1920 and p["h"] == 1440 and abs(p["fps"] - 60) < 0.01 and abs(p["dur"] - want) < 0.15,
+                      f"AI path ({name}): {p['w']}x{p['h']} at {p['fps']:.0f} fps, {p['dur']:.2f}s of {want:.2f}s")
+            en.CHUNK_FRAMES = old_chunk
             del os.environ["FPV_AI_DIR"]
 
     print()

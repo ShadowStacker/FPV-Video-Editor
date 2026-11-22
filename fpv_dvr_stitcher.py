@@ -57,8 +57,9 @@ class App:
         self.sel_seg: int | None = None
         self.thumb_req = 0
         self.preview_t: float | None = None          # moment last shown in the preview
-        self.enh_settings = en.EnhanceSettings()
-        self.v_fps60 = tk.BooleanVar(value=False)    # "Smooth 60 fps" (menu + Enhance window)
+        self.enh_settings = en.load_settings()       # remembered between runs
+        self.v_fps60 = tk.BooleanVar(value=self.enh_settings.fps60)   # "Smooth 60 fps" (menu + Enhance window)
+        self.v_fps60.trace_add("write", self._fps60_changed)
         self.enh_dialog = None
         self.enh_busy = False
 
@@ -391,6 +392,10 @@ class App:
             except Exception as e:
                 self.q.put(("error", f"{e}", traceback.format_exc()))
         threading.Thread(target=work, daemon=True).start()
+
+    def _fps60_changed(self, *_):
+        self.enh_settings.fps60 = bool(self.v_fps60.get())
+        en.save_settings(self.enh_settings)
 
     def open_enhance(self):
         if self.session is None or self.busy:

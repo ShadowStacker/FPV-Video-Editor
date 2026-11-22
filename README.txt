@@ -91,19 +91,26 @@ Signal-loss report       Saves a folder next to the video with report.html:
 ENHANCE FOR YOUTUBE
 -------------------
 Open it with "3. Enhance for YouTube..." (or the Enhance menu) after Analyse.
+Hover the mouse over any option (or click its ?) for what it does, how it
+affects quality and speed, and the recommended setting.
 Presets:
   Quick            No AI. Cleans colour speckles and grain, sharpens and
-                   upscales to 1440p. Runs about as fast as real time.
-  YouTube quality  Same clean-up, then AI upscaling (Real-ESRGAN) on the
-                   graphics card. Much slower - very roughly 1-2 hours for a
-                   30-minute session on an RTX 4070.
-Options:
+                   upscales to 1440p. About as fast as real time.
+  Balanced         Same clean-up, then the Fast AI model on the graphics card.
+  (default)        The recommended choice for YouTube.
+  Best quality     The Detailed AI model: sharpest, several times slower.
+Picture options:
+  AI resolution    Full size (best), or 1080p then scaled up (~45% less AI work).
   Smooth 60 fps    AI frame interpolation (RIFE). Also in the Enhance menu.
-                   Roughly doubles the processing time.
-  Size             1440p is recommended: YouTube gives 1440p uploads a better
-                   encoding than 1080p, even when the source is analog video.
-  Video codec      Auto uses the graphics card's encoder (NVIDIA NVENC, AMD or
-                   Intel) and falls back to the processor if there is none.
+  60 fps detail    Standard, or High-detail (better on very fast motion, slower).
+Speed options (all on by default, no effect on quality):
+  Work on several steps at once   prepares, AI-upscales and encodes in parallel
+  Prepare frames on all cores     splits the preparation into parallel parts
+  Denoise on the graphics card    Medium/Strong denoise on the GPU
+Size: 1440p is recommended - YouTube encodes 1440p uploads better than 1080p.
+The "Estimated time" panel shows how long the export will take. Each preview
+and export measures this PC's speed, so the estimate gets accurate; run one
+"Render 10 s preview" first. Your settings are remembered between runs.
 Before a long export:
   Compare frame        before/after picture of the moment shown in the main
                        window's preview (whole frame + 100% detail).

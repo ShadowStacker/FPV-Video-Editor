@@ -17,7 +17,8 @@ receiver recorded during a session (SD 3-minute clips or one long HD-mode file),
   re-encoded. Audio is removed;
 - **Enhance for YouTube**: optional second export that cleans up colour speckles
   and grain, upscales to 1440p (standard or AI with Real-ESRGAN on the graphics
-  card), can smooth to 60 fps (RIFE), and encodes on the GPU.
+  card), can smooth to 60 fps (RIFE), and encodes on the GPU, with every stage
+  running in parallel where it can.
 
 ![Screenshot](docs/screenshot.png)
 
@@ -63,16 +64,30 @@ signal. Sharing that zip is enough to tune the detector to your receiver.
 
 ## Enhance for YouTube
 
-| Preset | What it does | Speed |
-|---|---|---|
-| Quick | Colour-speckle clean-up, light temporal denoise, sharpening, Lanczos upscale to 1440p | About real time |
-| YouTube quality | Same clean-up, then AI upscaling (Real-ESRGAN, 4x) on the graphics card | Roughly 1-2 h for 30 min on an RTX 4070 |
+![Enhance window](docs/enhance_window.png)
 
-**Smooth 60 fps** (checkbox, also in the Enhance menu) adds RIFE frame interpolation.
-**Compare frame** shows a before/after picture of the current preview moment, and
-**Render 10 s preview** renders and plays a short sample before committing to a long
-export. Encoding uses NVIDIA NVENC, AMD AMF or Intel QSV when available, with CPU
-fallbacks. 1440p is the default because YouTube encodes 1440p uploads better than 1080p.
+| Preset | What it does |
+|---|---|
+| Quick | No AI. Colour-speckle clean-up, light denoise, sharpening, standard upscale to 1440p. About real time. |
+| Balanced (default) | Same clean-up, then the **Fast** AI model (realesr-animevideov3) on the graphics card. Several times faster than Best quality. |
+| Best quality | The **Detailed** AI model (Real-ESRGAN x4plus). Sharpest, slowest. |
+
+Every option has a hover explanation (or click its **?**) with its quality and speed trade-off and the
+recommended setting. Options:
+
+- **Picture:** colour speckles, grain denoise (Off/Light/Medium/Strong), sharpen, AI or standard upscaling,
+  AI model, **AI resolution** (full size, or 1080p then scaled up: about 45% less AI work),
+  **Smooth 60 fps** (RIFE; also in the Enhance menu) and **60 fps detail** (Standard or the slower High-detail).
+- **Speed:** **work on several steps at once** (frames are prepared, AI-upscaled and encoded in parallel),
+  **prepare frames on all processor cores** (also splits the Quick export into parallel parts), and
+  **denoise on the graphics card** (Medium/Strong via Vulkan, with automatic fallback to the processor).
+- **Output:** 1080p / 1440p (recommended: YouTube encodes 1440p uploads better) / 4K, and the video codec.
+  Encoding uses NVIDIA NVENC, AMD AMF or Intel QSV when available, with CPU fallbacks.
+
+The **estimated time** panel shows how long the export will take and what runs on the processor and the
+graphics card. The speed of each stage is measured on every preview and export and remembered, so the
+estimate (and the time left while exporting) fits the PC. **Compare frame** shows a before/after picture;
+**Render 10 s preview** renders a short sample (and measures the speed). Settings are remembered between runs.
 
 ## How static is told apart from weak signal
 
@@ -111,9 +126,9 @@ Files:
 | File | Contents |
 |---|---|
 | `dvr_core.py` | Analysis, classification, STATS detection, lossless export (FFmpeg stream copy), report, diagnostics |
-| `enhance.py` | Enhance for YouTube pipeline (filters, AI upscale, 60 fps, GPU encoding) |
+| `enhance.py` | Enhance for YouTube pipeline (filters, AI upscale, 60 fps, GPU encoding, parallel/overlapped stages, speed estimates) |
 | `fpv_dvr_stitcher.py` | The Tkinter desktop app |
-| `enhance_ui.py` | The Enhance for YouTube window |
+| `enhance_ui.py` | The Enhance for YouTube window (hover help, estimate panel) |
 | `tests/smoke_test.py` | End-to-end self-test |
 | `.github/workflows/build.yml` | Windows build: test, build both .exe versions, assemble the AI add-on, test the .exe files, attach to releases |
 
