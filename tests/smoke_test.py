@@ -8,21 +8,27 @@ and export and checks that:
   * the static is found at the right times and the right parts are cut,
   * the exported video contains exactly the kept frames, byte-for-byte
     identical to the originals (no re-encoding),
-  * MKV export gets one chapter per flight and the report is written.
+  * MKV export gets one chapter per flight and the report is written,
+  * the diagnostics zip is complete and its sample frames are exact copies.
 
 Needs ffmpeg + ffprobe (next to dvr_core.py, in ./ffmpeg, or on the PATH).
 Run:  python tests/smoke_test.py [folder-to-keep-the-fake-clips-in]
 """
 from __future__ import annotations
 
+import hashlib
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+import numpy as np  # noqa: E402
+
 import dvr_core as dc  # noqa: E402
 
 FPS = "109/4"   # 27.25 fps, like the real receiver
@@ -122,6 +128,31 @@ def main() -> int:
         print("Writing report...")
         rep = dc.write_report(s, os.path.join(d, "stitched.avi"))
         check(os.path.isfile(rep) and os.path.getsize(rep) > 500, "signal-loss report written")
+
+        print("Saving diagnostics...")
+        dz = os.path.join(d, "diagnostics.zip")
+        info = dc.save_diagnostics(s, dz)
+        with zipfile.ZipFile(dz) as z:
+            names = z.namelist()
+            check(all(n in names for n in ("info.txt", "README.txt", "measurements.csv", "blocks.npy")),
+                  "diagnostics zip has info, measurements and block grid")
+            rows = z.read("measurements.csv").decode().splitlines()
+            check(len(rows) == s.n + 1, f"measurements.csv has a row for every frame ({len(rows) - 1} of {s.n})")
+            blocks = np.load(io.BytesIO(z.read("blocks.npy")))
+            check(blocks.shape == (s.n, 48), f"blocks.npy shape {blocks.shape}")
+            frames = [n for n in names if n.startswith("frames/")]
+            check(len(frames) == info["frames"] and len(frames) >= 20, f"{len(frames)} sample frames saved")
+            # every sample frame must be the exact original packet
+            by_name = {os.path.splitext(os.path.basename(f))[0]: f for f in files}
+            exact = 0
+            for n in frames:
+                stem = os.path.basename(n)[:-4]
+                clip, fi = stem.rsplit("_", 2)[-2], int(stem.rsplit("_f", 1)[1])
+                if hashlib.md5(z.read(n)).hexdigest() == src[by_name[clip]][fi]:
+                    exact += 1
+            check(exact == len(frames), f"sample frames byte-identical to the originals ({exact}/{len(frames)})")
+            tags = {os.path.basename(n).split("_")[1] for n in frames}
+            check({"static-start", "static-end", "flight-good"} <= tags, f"sample frames cover {sorted(tags)}")
 
     print()
     if FAILURES:

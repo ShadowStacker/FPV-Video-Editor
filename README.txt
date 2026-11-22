@@ -95,6 +95,8 @@ TROUBLESHOOTING
                                 folder as the program.
 Static not cut / weak signal cut -> adjust "Static = snow covers at least",
                                 or flip individual rows with a double-click.
-For tuning on your own footage, the command-line version can dump the
-per-frame measurements:
-    python dvr_core.py VID00001.AVI VID00002.AVI --dump measurements.csv
+Detection looks wrong on your footage -> after Analyse, press
+    "Save diagnostics..." and send the zip it makes (usually 10-25 MB). It
+    holds the detector's measurements for every frame plus a selection of
+    original frames around each start/stop of the signal - no full videos -
+    so the detector can be tuned to your receiver.

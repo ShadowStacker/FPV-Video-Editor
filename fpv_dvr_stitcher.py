@@ -166,6 +166,8 @@ class App:
         self.btn_ex.pack(side="left", padx=8)
         self.btn_cancel = ttk.Button(bar, text="Cancel", command=self.do_cancel, state="disabled")
         self.btn_cancel.pack(side="left")
+        self.btn_diag = ttk.Button(bar, text="Save diagnostics...", command=self.save_diag, state="disabled")
+        self.btn_diag.pack(side="right")
         self.summary = ttk.Label(bar, text="", font=("Segoe UI", 10, "bold"))
         self.summary.pack(side="left", padx=14)
 
@@ -236,6 +238,7 @@ class App:
         self.session = None
         self.sel_seg = None
         self.btn_ex.configure(state="disabled")
+        self.btn_diag.configure(state="disabled")
         self.tv.delete(*self.tv.get_children())
         self.summary.configure(text="")
         self.draw_timeline()
@@ -302,6 +305,7 @@ class App:
         self.busy = busy
         self.btn_an.configure(state="disabled" if busy else "normal")
         self.btn_ex.configure(state="disabled" if busy or self.session is None else "normal")
+        self.btn_diag.configure(state="disabled" if busy or self.session is None else "normal")
         self.btn_cancel.configure(state="normal" if busy else "disabled")
         self.root.configure(cursor="watch" if busy else "")
 
@@ -332,6 +336,37 @@ class App:
                 s = dc.analyze_files(files, lambda f, m: self.q.put(("progress", f, m)), self.cancel, st)
                 self.q.put(("analysed", s))
             except dc.Cancelled:
+                self.q.put(("cancelled",))
+            except Exception as e:
+                self.q.put(("error", f"{e}", traceback.format_exc()))
+        threading.Thread(target=work, daemon=True).start()
+
+    def save_diag(self):
+        """Measurements + sample frames in one zip, for tuning the detector on this footage."""
+        s = self.session
+        if self.busy or s is None:
+            return
+        first = os.path.splitext(os.path.basename(s.clips[0].path))[0]
+        last = os.path.splitext(os.path.basename(s.clips[-1].path))[0]
+        name = f"{first}-{last}_diagnostics.zip" if first != last else f"{first}_diagnostics.zip"
+        out = filedialog.asksaveasfilename(
+            title="Save diagnostics as", initialdir=os.path.dirname(s.clips[0].path),
+            initialfile=name, defaultextension=".zip", filetypes=[("Zip file", "*.zip")])
+        if not out:
+            return
+        self.cancel.clear()
+        self._set_busy(True)
+
+        def work():
+            try:
+                info = dc.save_diagnostics(s, out, lambda f, m: self.q.put(("progress", f, m)), self.cancel)
+                self.q.put(("diag_saved", info))
+            except dc.Cancelled:
+                for f in (out, out + ".part"):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
                 self.q.put(("cancelled",))
             except Exception as e:
                 self.q.put(("error", f"{e}", traceback.format_exc()))
@@ -407,6 +442,17 @@ class App:
                     if warn_rows:
                         self.tv.selection_set(str(warn_rows[0]))
                         self.tv.see(str(warn_rows[0]))
+                elif kind == "diag_saved":
+                    info = msg[1]
+                    self._set_busy(False)
+                    self.pb.configure(value=1000)
+                    self.status.configure(text=f"Saved {info['path']}")
+                    if messagebox.askyesno(
+                            dc.APP_NAME,
+                            f"Diagnostics saved ({info['size'] / 1e6:.1f} MB, {info['frames']} sample frames):\n"
+                            f"{info['path']}\n\nUpload this zip file in your chat with Claude so the "
+                            f"detector can be tuned to your footage.\n\nOpen the folder now?"):
+                        self._open_path(os.path.dirname(info["path"]))
                 elif kind == "exported":
                     _, out, rep, info = msg
                     self._set_busy(False)
@@ -643,7 +689,11 @@ def selftest(report_path: str, clips: list[str]) -> int:
             out = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_export.mkv")
             info = dc.export_video(s, out)
             lines.append(f"export: {info['duration']:.2f}s in {info['pieces']} pieces -> {out}")
-            ok = os.path.getsize(out) > 0 and sum(1 for g in s.segments if g.action == "cut") > 0
+            dz = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_diagnostics.zip")
+            d = dc.save_diagnostics(s, dz)
+            lines.append(f"diagnostics: {d['size']} bytes, {d['frames']} frames -> {dz}")
+            ok = (os.path.getsize(out) > 0 and sum(1 for g in s.segments if g.action == "cut") > 0
+                  and d["frames"] > 0)
         root.destroy()
     except Exception:
         ok = False

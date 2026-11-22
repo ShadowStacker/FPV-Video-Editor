@@ -49,6 +49,11 @@ to the release within a few minutes.
 
 See [README.txt](README.txt) for what each setting does.
 
+If detection looks wrong on your footage, press **Save diagnostics...** after analysing.
+It saves one zip, usually 10-25 MB, containing the detector's measurements for every
+frame and a selection of original frames from around each start and stop of the signal.
+Sharing that zip is enough to tune the detector to your receiver, with no full videos needed.
+
 ## How static is told apart from weak signal
 
 Measured on real analog DVR recordings:
@@ -72,8 +77,8 @@ VTX goes from a clean picture straight to static.
 - `build.bat` (Windows, needs Python 3) builds `dist\FPV DVR Stitcher.exe` and
   downloads FFmpeg next to it.
 - `run.bat` runs it straight from source.
-- `python dvr_core.py VID*.AVI -o out.avi --report` is a command-line version;
-  add `--dump frames.csv` to save the per-frame measurements for tuning.
+- `python dvr_core.py VID*.AVI -o out.avi --report` is a command-line version.
+  Add `--diagnostics diag.zip` (or `--dump frames.csv`) to save the measurements for tuning.
 - `python tests/smoke_test.py` runs the end-to-end self-test. It builds a fake
   DVR session, then checks detection and that the export is byte-identical.
 

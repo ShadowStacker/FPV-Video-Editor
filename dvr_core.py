@@ -11,20 +11,24 @@ Can be used on its own from the command line:
 from __future__ import annotations
 
 import html
+import io
 import math
 import os
+import platform
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak
@@ -144,6 +148,9 @@ class Clip:
     offset: float = 0.0             # session time of this clip's first frame
     feats: dict = field(default_factory=dict)
     seek_ok: bool | None = None     # can ffmpeg seek inside this file? (None = not tested yet)
+    pkt_pos: np.ndarray = None      # byte offset of every frame's packet (for diagnostics)
+    pkt_size: np.ndarray = None
+    blocks: np.ndarray = None       # (frames, 48) block noise grid, float16 (for diagnostics)
 
     @property
     def nframes(self) -> int:
@@ -211,6 +218,8 @@ class Session:
         self.f = {}
         for k in clips[0].feats if clips else []:
             self.f[k] = np.concatenate([c.feats[k] for c in clips])
+        self.blocks = (np.concatenate([c.blocks for c in clips])
+                       if clips and all(c.blocks is not None for c in clips) else None)
         self.labels = np.zeros(n, np.int8)
         self.segments: list[Segment] = []
         self.notes: list[str] = []
@@ -279,9 +288,9 @@ def probe_clip(path: str) -> Clip:
     c.fps = rate(info.get("avg_frame_rate", "0/0")) or rate(info.get("r_frame_rate", "0/0")) or 30.0
 
     out = run_text([tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
-                    "-show_entries", "packet=pts_time,dts_time,size,flags",
+                    "-show_entries", "packet=pts_time,dts_time,size,flags,pos",
                     "-of", "compact=p=0", path])
-    pts, keys = [], []
+    pts, keys, poss, sizes = [], [], [], []
     for line in out.splitlines():
         d = dict(kv.split("=", 1) for kv in line.split("|") if "=" in kv)
         try:
@@ -296,9 +305,17 @@ def probe_clip(path: str) -> Clip:
             continue
         v = float(ts)
         pts.append(v)
+        try:
+            poss.append(int(d.get("pos", "-1")))
+        except ValueError:
+            poss.append(-1)
+        sizes.append(int(d.get("size", "0") or 0))
         if "K" in d.get("flags", ""):
             keys.append(v)
-    c.pts = np.sort(np.array(pts, dtype=np.float64))
+    order = np.argsort(np.array(pts, dtype=np.float64), kind="stable")
+    c.pts = np.array(pts, dtype=np.float64)[order]
+    c.pkt_pos = np.array(poss, dtype=np.int64)[order]
+    c.pkt_size = np.array(sizes, dtype=np.int64)[order]
     c.key_pts = np.array(sorted(keys), dtype=np.float64)
     c.intra_only = c.codec in ("mjpeg", "mjpegb", "rawvideo", "ljpeg", "jpeg2000", "prores",
                                "dnxhd", "ffv1", "huffyuv", "utvideo", "png", "dvvideo") \
@@ -324,7 +341,9 @@ def _frame_features(y: np.ndarray, u: np.ndarray, v: np.ndarray, noise_t: float)
         "tear": (vd / (hdm + 1.0)).astype(np.float32),
         "chroma": chroma.astype(np.float32),
         "bright": y.mean(axis=(1, 2)).astype(np.float32),
-    }
+        "hd": hdm.astype(np.float32),
+        "vd": vd.astype(np.float32),
+    }, blocks.astype(np.float16)
 
 
 def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
@@ -342,7 +361,8 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
     t_err = threading.Thread(target=lambda: errbuf.append(proc.stderr.read()), daemon=True)
     t_err.start()
 
-    parts = {k: [] for k in ("snow", "noise", "tear", "chroma", "bright", "motion", "persist")}
+    parts = {k: [] for k in ("snow", "noise", "tear", "chroma", "bright", "hd", "vd", "motion", "persist")}
+    block_parts = []
     prev_coarse = None
     done = 0
     try:
@@ -359,9 +379,10 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
             y = a[:, :ysz].reshape(k, AH, AW).astype(np.float32)
             u = a[:, ysz:ysz + csz].reshape(k, AH // 2, AW // 2).astype(np.float32)
             v = a[:, ysz + csz:].reshape(k, AH // 2, AW // 2).astype(np.float32)
-            f = _frame_features(y, u, v, noise_t)
+            f, blk = _frame_features(y, u, v, noise_t)
             for key in f:
                 parts[key].append(f[key])
+            block_parts.append(blk)
 
             # motion: coarse 40x30 frame-to-frame change
             coarse = y.reshape(k, 30, 4, 40, 4).mean(axis=(2, 4))
@@ -402,18 +423,20 @@ def analyze_clip(c: Clip, progress=None, cancel: threading.Event | None = None,
     if n == 0:
         err = (errbuf[0] if errbuf else b"").decode("utf-8", "replace")
         raise RuntimeError(f"Could not decode {os.path.basename(c.path)}\n{err[-1500:]}")
+    blocks = np.concatenate(block_parts) if block_parts else np.zeros((0, 48), np.float16)
     # align decoded frames with packet timestamps
     if n != c.nframes:
         if abs(n - c.nframes) <= max(3, 0.01 * n) and c.nframes > 0:
             m = min(n, c.nframes)
-            c.pts = c.pts[:m]
+            c.pts, c.pkt_pos, c.pkt_size = c.pts[:m], c.pkt_pos[:m], c.pkt_size[:m]
             feats = {k: v[:m] for k, v in feats.items()}
-            if n > m:     # decoder produced a few more frames than packets
-                pass
+            blocks = blocks[:m]
         else:
             start = c.pts[0] if c.nframes else 0.0
             c.pts = start + np.arange(n) / c.fps
+            c.pkt_pos = c.pkt_size = None
     c.feats = feats
+    c.blocks = blocks
     return c
 
 
@@ -935,6 +958,162 @@ next to this report.</p>
 
 
 # ---------------------------------------------------------------------------
+# Diagnostics (for tuning the detector on real footage)
+# ---------------------------------------------------------------------------
+DIAG_FRAME_BUDGET = 16 * 1024 * 1024    # bytes of sample frames to put in the zip
+
+
+def _read_frame_jpeg(c: Clip, fi: int) -> bytes | None:
+    """The exact original frame of an MJPEG clip, read straight from its byte position."""
+    if c.codec != "mjpeg" or c.pkt_pos is None or fi >= len(c.pkt_pos) or c.pkt_pos[fi] < 0:
+        return None
+    size = int(c.pkt_size[fi])
+    try:
+        with open(c.path, "rb") as fh:
+            fh.seek(int(c.pkt_pos[fi]))
+            data = fh.read(size + 32)
+    except OSError:
+        return None
+    k = data.find(b"\xff\xd8", 0, 32)
+    return data[k:k + size] if k >= 0 else None
+
+
+def _encode_frame_jpeg(c: Clip, fi: int) -> bytes:
+    """Fallback for non-MJPEG clips: decode the frame and save it as a high-quality JPEG."""
+    cmd = [tool("ffmpeg"), "-v", "error", "-nostdin", "-ss", f"{max(0.0, c.pts[fi] + 0.001):.4f}",
+           "-i", c.path, "-frames:v", "1", "-an", "-c:v", "mjpeg", "-q:v", "1", "-f", "mjpeg", "pipe:1"]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                       stdin=subprocess.DEVNULL, **_popen_kwargs())
+    return p.stdout
+
+
+def _diag_picks(s: Session) -> list[tuple[int, str]]:
+    """Frames worth looking at, most useful first."""
+    lab = s.labels
+    snow = lab == LABEL_SNOW
+    merged = _smooth(snow, s.frames_for(2.0)) > 0.5          # static with short blips merged in
+    static_runs = [(a, b) for a, b in _runs(merged) if b - a >= s.frames_for(1.0)]
+    static_runs.sort(key=lambda r: r[1] - r[0], reverse=True)
+
+    def spread(idx, k):
+        if len(idx) == 0:
+            return []
+        return [int(idx[i]) for i in np.unique(np.linspace(0, len(idx) - 1, min(k, len(idx))).astype(int))]
+
+    inside, flights, edges = [], [], []
+    for a, b in static_runs:
+        # frames inside static that were NOT counted as static (these split the static up)
+        inside += [(a + i, "in-static-not-snow") for i in spread(np.flatnonzero(lab[a:b] != LABEL_SNOW), 8)]
+        inside.append(((a + b) // 2, "in-static"))
+    for a, b in _runs(~merged):
+        if b - a < s.frames_for(5.0):
+            continue
+        for want, name in ((LABEL_WEAK, "flight-weak"), (LABEL_GOOD, "flight-good")):
+            flights += [(a + i, name) for i in spread(np.flatnonzero(lab[a:b] == want), 4)]
+    step = s.frames_for(0.33)
+    for a, b in static_runs:
+        edges += [(g, "static-start") for g in range(a - s.frames_for(3.0), a + s.frames_for(1.0), step)]
+        edges += [(g, "static-end") for g in range(b - s.frames_for(1.0), b + s.frames_for(3.0), step)]
+    out, seen = [], set()
+    for g, tag in inside + flights + edges:
+        if 0 <= g < s.n and g not in seen:
+            seen.add(g)
+            out.append((g, tag))
+    return out
+
+
+def save_diagnostics(s: Session, zip_path: str, progress=None, cancel=None,
+                     frame_budget: int = DIAG_FRAME_BUDGET) -> dict:
+    """Write measurements + sample original frames into one zip that can be sent for tuning."""
+    def prog(f, msg):
+        if cancel is not None and cancel.is_set():
+            raise Cancelled()
+        if progress:
+            progress(f, msg)
+
+    prog(0.0, "Saving diagnostics: measurements...")
+    keep = s.keep_mask()
+    labels_txt = ("good", "weak", "static")
+    tmp = zip_path + ".part"
+    n_frames = 0
+    frame_bytes = 0
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        # -- summary ----------------------------------------------------------
+        try:
+            ffv = run_text([tool("ffmpeg"), "-hide_banner", "-version"]).splitlines()[0]
+        except Exception as e:
+            ffv = f"(ffmpeg version unknown: {e})"
+        st = s.settings
+        lines = [f"{APP_NAME} {APP_VERSION} diagnostics",
+                 f"created: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                 f"system: {platform.platform()} / Python {platform.python_version()} / numpy {np.__version__}",
+                 f"ffmpeg: {ffv}", "",
+                 f"settings: min_cut={st.min_cut} pad={st.pad} faint_protect={st.faint_protect} "
+                 f"snow_cover={st.snow_cover} noise_t={st.noise_t}",
+                 f"constants: NOISE_T={NOISE_T} SNOW_COVER_T={SNOW_COVER_T} TEAR_T={TEAR_T} "
+                 f"PERSIST_T={PERSIST_T} analysis={AW}x{AH} block={BLOCK}", "",
+                 "clips:"]
+        for c in s.clips:
+            lines.append(f"  {os.path.basename(c.path)}  codec={c.codec} {c.width}x{c.height} fps={c.fps:.4f} "
+                         f"frames={c.nframes} length={c.length:.2f}s intra={c.intra_only} "
+                         f"seekable={c.seek_ok} first_pts={c.pts[0]:.4f} bytes={os.path.getsize(c.path)}")
+        lines += ["", "label share: " + ", ".join(
+            f"{labels_txt[k]}={100 * float((s.labels == k).mean()):.1f}%" for k in range(3)), "",
+            summary_table(s)]
+        z.writestr("info.txt", "\n".join(lines) + "\n")
+        z.writestr("README.txt",
+                   "Diagnostics from FPV DVR Stitcher - send this whole zip to whoever is tuning the detector.\n\n"
+                   "info.txt          settings, clip details and the segment list\n"
+                   "measurements.csv  every number the detector computed, for every frame\n"
+                   "blocks.npy        per-frame noise level of each of the 8x6 regions (numpy float16)\n"
+                   "frames/           sample frames, exact copies of the originals where possible;\n"
+                   "                  file names give session time, why the frame was picked and its label\n")
+
+        # -- per-frame measurements -------------------------------------------
+        keys = list(s.f)
+        buf = io.StringIO()
+        buf.write("file,frame,pts,session_t,label,keep," + ",".join(keys) + "\n")
+        names = [os.path.basename(c.path) for c in s.clips]
+        cols = [s.f[k] for k in keys]
+        for g in range(s.n):
+            c = s.clips[s.clip_idx[g]]
+            fi = s.frame_idx[g]
+            buf.write(f"{names[s.clip_idx[g]]},{fi},{c.pts[fi]:.4f},{s.t[g]:.4f},{s.labels[g]},{int(keep[g])},"
+                      + ",".join("nan" if not np.isfinite(col[g]) else f"{col[g]:.3f}" for col in cols) + "\n")
+            if g % 5000 == 0:
+                prog(0.15 * g / max(1, s.n), "Saving diagnostics: measurements...")
+        z.writestr("measurements.csv", buf.getvalue())
+        if s.blocks is not None:
+            b = io.BytesIO()
+            np.save(b, s.blocks.astype(np.float16))
+            z.writestr("blocks.npy", b.getvalue())
+
+        # -- sample frames ------------------------------------------------------
+        picks = _diag_picks(s)
+        for i, (g, tag) in enumerate(picks):
+            prog(0.2 + 0.8 * i / max(1, len(picks)), f"Saving diagnostics: frames {i + 1}/{len(picks)}...")
+            c = s.clips[s.clip_idx[g]]
+            fi = int(s.frame_idx[g])
+            data = _read_frame_jpeg(c, fi)
+            exact = data is not None
+            if not exact:
+                data = _encode_frame_jpeg(c, fi)
+            if not data:
+                continue
+            if frame_bytes + len(data) > frame_budget:
+                break
+            name = (f"frames/{float(s.t[g]):08.2f}s_{tag}_{labels_txt[int(s.labels[g])]}_"
+                    f"{os.path.splitext(names[s.clip_idx[g]])[0]}_f{fi:05d}{'' if exact else '_reenc'}.jpg")
+            z.writestr(zipfile.ZipInfo(name, time.localtime()[:6]), data, compress_type=zipfile.ZIP_STORED)
+            frame_bytes += len(data)
+            n_frames += 1
+    os.replace(tmp, zip_path)
+    prog(1.0, "Diagnostics saved.")
+    return {"path": zip_path, "size": os.path.getsize(zip_path), "frames": n_frames,
+            "frames_offered": len(picks)}
+
+
+# ---------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------
 def summary_table(s: Session) -> str:
@@ -957,6 +1136,7 @@ def main(argv=None):
     ap.add_argument("--no-faint-protect", action="store_true")
     ap.add_argument("--report", action="store_true", help="also write the signal-loss report")
     ap.add_argument("--dump", help="write per-frame measurements to this CSV (for tuning)")
+    ap.add_argument("--diagnostics", help="write a diagnostics zip (measurements + sample frames)")
     a = ap.parse_args(argv)
     files = sorted(a.files, key=natural_key)
     st = Settings(min_cut=a.min_cut, pad=a.pad, faint_protect=not a.no_faint_protect)
@@ -974,6 +1154,10 @@ def main(argv=None):
                 c = s.clips[s.clip_idx[g]]
                 fh.write(f"{os.path.basename(c.path)},{s.frame_idx[g]},{s.t[g]:.3f},{s.labels[g]},"
                          + ",".join(f"{s.f[k][g]:.3f}" for k in keys) + "\n")
+    if a.diagnostics:
+        info = save_diagnostics(s, a.diagnostics, prog)
+        print(file=sys.stderr)
+        print(f"diagnostics: {info['path']} ({info['size'] / 1e6:.1f} MB, {info['frames']} frames)")
     if a.output:
         export_video(s, a.output, prog)
         print(file=sys.stderr)
