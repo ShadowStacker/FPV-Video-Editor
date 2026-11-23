@@ -245,30 +245,30 @@ class OnnxModel:
         if not files:
             raise RuntimeError(f"The model '{info.name if info else mid}' is not downloaded yet.")
         provs = providers() if use_gpu else ["CPUExecutionProvider"]
-        on_gpu = provs[0] != "CPUExecutionProvider"
+        gpu = provs[0] if provs[0] != "CPUExecutionProvider" else None
         # half precision on the graphics card (about twice as fast), full precision on the processor
-        order = ["fp16", "fp32"] if on_gpu else ["fp32", "fp16"]
+        combos = ([(gpu, "fp16"), (gpu, "fp32")] if gpu else []) + \
+            [("CPUExecutionProvider", "fp32"), ("CPUExecutionProvider", "fp16")]
         self.sess = None
         last = None
-        for key in order:
+        for pv, key in combos:
             if key not in files:
                 continue
-            for pv in ([provs[0], "CPUExecutionProvider"] if on_gpu else ["CPUExecutionProvider"]):
-                try:
-                    so = ort.SessionOptions()
-                    so.enable_mem_pattern = False                 # required by DirectML
-                    so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-                    so.log_severity_level = 3
-                    sess = ort.InferenceSession(files[key], so, providers=[pv])
-                    self.sess, self.provider, self.precision = sess, pv, key
-                    if self._sane():
-                        break
-                    self.sess = None
-                except Exception as e:      # noqa: BLE001 - try the next combination
-                    last = e
-                    self.sess = None
-            if self.sess is not None:
-                break
+            try:
+                so = ort.SessionOptions()
+                so.enable_mem_pattern = False                 # required by DirectML
+                so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                so.log_severity_level = 3
+                sess = ort.InferenceSession(files[key], so, providers=[pv])
+                if (sess.get_providers() or ["CPUExecutionProvider"])[0] != pv:
+                    continue                # ONNX Runtime fell back by itself (no usable graphics card)
+                self.sess, self.provider, self.precision = sess, pv, key
+                if self._sane():
+                    break
+                self.sess = None
+            except Exception as e:      # noqa: BLE001 - try the next combination
+                last = e
+                self.sess = None
         if self.sess is None:
             raise RuntimeError(f"Could not load the model: {last}")
         self.input = self.sess.get_inputs()[0].name

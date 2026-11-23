@@ -581,14 +581,15 @@ class EnhanceDialog(tk.Toplevel):
                                        "smooth 60 fps)")
         need = en.models_needed(self.es)
         miss = en.missing_models(self.es)
-        where = "graphics card" if mdl.gpu_available() else "processor (slow: no DirectX 12 graphics card found)"
+        where = next((m.device for m in mdl._LOADED.values()), None)     # known once a model has run
         if miss:
             size = sum(mdl.BY_ID[m].size_mb for m in miss)
             self.lbl_models.configure(text="Models: " + ", ".join(mdl.BY_ID[m].name for m in miss)
                                            + f" not downloaded yet ({size:.0f} MB)")
             self.btn_dlm.pack(side="left", padx=8)
         else:
-            self.lbl_models.configure(text=f"Models: downloaded, run on the {where}" if need else "")
+            self.lbl_models.configure(text=("Models: downloaded" + (f", running on the {where}" if where else ""))
+                                      if need else "")
             self.btn_dlm.pack_forget()
 
     # -------------------------------------------------------------- actions
