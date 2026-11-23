@@ -146,7 +146,7 @@ class App:
         self._fill_edit_menu(self.menu_edit)
         mb.add_cascade(label="Edit", menu=self.menu_edit)
         em = tk.Menu(mb, tearoff=0)
-        em.add_command(label="Enhance for YouTube...", command=self.open_enhance)
+        em.add_command(label="Enhance video...", command=self.open_enhance)
         em.add_checkbutton(label="Smooth 60 fps (AI frame interpolation)", variable=self.v_fps60,
                            onvalue=True, offvalue=False)
         em.add_separator()
@@ -329,7 +329,7 @@ class App:
         self.btn_ex.pack(side="left", padx=8)
         self.btn_cancel = ttk.Button(bar, text="Cancel", command=self.do_cancel, state="disabled")
         self.btn_cancel.pack(side="left")
-        self.btn_enh = ttk.Button(bar, text="3.  Enhance for YouTube...", style="Big.TButton",
+        self.btn_enh = ttk.Button(bar, text="3.  Enhance video...", style="Big.TButton",
                                   command=self.open_enhance, state="disabled")
         self.btn_enh.pack(side="left", padx=(0, 8), before=self.btn_cancel)
         self.summary = ttk.Label(bar, text="", font=("Segoe UI", 10, "bold"))
@@ -675,7 +675,7 @@ class App:
                     self.status.configure(text=f"Saved {out}")
                     text = f"Saved:\n{out}\n\nLength {dc.fmt_time(info['duration'])}, no re-encoding (original quality)."
                     if info.get("chapters_txt"):
-                        text += f"\n\nChapters for YouTube:\n{info['chapters_txt']}"
+                        text += f"\n\nChapter list (to paste into a video description):\n{info['chapters_txt']}"
                     if rep:
                         text += f"\n\nSignal-loss report:\n{rep}"
                     text += "\n\nOpen the folder now?"
@@ -1643,7 +1643,7 @@ def selftest(report_path: str, clips: list[str]) -> int:
             es = en.EnhanceSettings()
             en.apply_preset(es, "quick")
             es.height = 1080
-            ye = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_youtube.mp4")
+            ye = os.path.join(os.path.dirname(os.path.abspath(report_path)), "selftest_enhanced.mp4")
             t0 = next(g.t0 for g in s.segments if g.kind == "signal")
             r = en.enhance(s, ye, es, t_range=(t0, t0 + 4.0))
             lines.append(f"enhance: {r['size'][0]}x{r['size'][1]} via {r['encoder']} -> {ye}")

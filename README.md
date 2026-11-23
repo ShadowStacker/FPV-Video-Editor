@@ -18,11 +18,11 @@ receiver recorded during a session (SD 3-minute clips or one long HD-mode file),
 - **lets you fine-tune every cut**: drag a cut on the timeline or type its time, split
   parts, play the result as it will be exported, undo;
 - **chapters**: one per flight plus your own, written into MKV / MP4 exports and saved as a
-  list ready to paste into a YouTube description;
-- **Enhance for YouTube**: optional second export that replaces broken frames and
-  fills in streaks from breakup, cleans up rainbow colour noise and grain (optionally with a
-  clean-up AI model for analog video), upscales to 1440p (standard or AI on the graphics
-  card), can smooth to 60 fps (RIFE), and encodes on the GPU, with every stage running in
+  list ready to paste into a video description;
+- **Enhance video**: optional second export that replaces broken frames and
+  fills in streaks from breakup, cleans up rainbow colour noise and grain (optionally with
+  clean-up AI models for analog video), upscales to 1440p (standard or AI on the graphics
+  card) or keeps the original size, can smooth to 60 fps (RIFE), and encodes on the GPU, with every stage running in
   parallel where it can.
 
 ![Screenshot](docs/screenshot.png)
@@ -31,11 +31,13 @@ receiver recorded during a session (SD 3-minute clips or one long HD-mode file),
 
 Go to **[Releases](../../releases/latest)** and download:
 
-- **`FPV-DVR-Stitcher.exe`**: a single file with everything built in. Download it and run it.
+The file names carry the version (`<version>` below, e.g. `1.4.0`).
+
+- **`FPV-DVR-Stitcher-<version>.exe`**: a single file with everything built in. Download it and run it.
   It takes a few seconds to open because it unpacks FFmpeg each time. The AI add-on
   (about 70 MB) is downloaded the first time you use AI upscaling or 60 fps, and each
   clean-up / extra upscaling model (1-45 MB) the first time it is used.
-- **`FPV-DVR-Stitcher-windows.zip`**: the same program with FFmpeg and the AI add-on as
+- **`FPV-DVR-Stitcher-<version>-windows.zip`**: the same program with FFmpeg and the AI add-on as
   separate files. It starts faster. Unzip it and run `FPV DVR Stitcher.exe`.
 
 No install and no Python needed. Windows SmartScreen may warn the first time because
@@ -58,7 +60,7 @@ need to be signed in to GitHub). To publish a new version, go to
    to switch it between Keep and Cut.
 4. Fine-tune if you like (below).
 5. **Export video...** as AVI (same format as the originals) or MKV (with chapter
-   markers), and/or **Enhance for YouTube...** for an upload-ready MP4.
+   markers), and/or **Enhance video...** for a cleaned-up MP4 ready to upload.
 
 ### Editing, playing and chapters
 
@@ -73,8 +75,8 @@ need to be signed in to GitHub). To publish a new version, go to
   cut/keep (X), play 3 s around a cut (P), add a chapter (C), chapters, zoom, undo
   (Ctrl+Z), reset to the detected cuts.
 - **Chapters:** every flight gets one (green flags above the timeline); add your own (purple)
-  and rename any in **Edit > Chapters...**. YouTube reads chapters only from the video's
-  description, so **Copy for YouTube** gives the list in its format and checks YouTube's rules
+  and rename any in **Edit > Chapters...**. Video sites read chapters only from the video's
+  description, so **Copy chapter list** gives the list in that format and checks the usual rules
   (first at 00:00, at least 3, each at least 10 s). MKV and MP4 exports get the chapter
   markers, and every export saves the list as `..._chapters.txt`.
 
@@ -87,7 +89,7 @@ analysing. It saves one zip, usually 10-25 MB, containing the detector's measure
 every frame and a selection of original frames from around each start and stop of the
 signal. Sharing that zip is enough to tune the detector to your receiver.
 
-## Enhance for YouTube
+## Enhance video
 
 ![Enhance window](docs/enhance_window.png)
 
@@ -97,7 +99,7 @@ signal. Sharing that zip is enough to tune the detector to your receiver.
 | Balanced (default) | Repair, the **BleedOut** clean-up model, then the **Fast** AI model (realesr-animevideov3) on the graphics card. |
 | Best quality | The same with the **Detailed** AI model (Real-ESRGAN x4plus). Sharpest, slowest. |
 
-**Repair and clean-up** (new in 1.3):
+**Repair breakup** (only where the signal broke up) and **clean-up models** (every frame):
 
 - **Replace broken frames:** frames that came out torn, rolled or blown out by breakup, while
   the frames either side are fine, are found by comparing each frame with its neighbours
@@ -106,7 +108,7 @@ signal. Sharing that zip is enough to tune the detector to your receiver.
   are real breakup and stay in.
 - **Repair lines:** short-lived bands of rainbow colour noise and streak lines across the
   picture are filled in from the rows above and below; the OSD is left alone.
-- **Clean-up model** and more **AI models**, run with ONNX Runtime (DirectML) on any DirectX 12
+- **Clean-up models** (tick any number; they run one after another) and more **AI upscalers**, run with ONNX Runtime (DirectML) on any DirectX 12
   graphics card and downloaded from the releases when first used. There are no models trained
   on FPV footage; these are free community models trained for analog / VHS / composite video,
   which has the same faults:
@@ -126,19 +128,21 @@ signal. Sharing that zip is enough to tune the detector to your receiver.
 Every option has a hover explanation (or click its **?**) with its quality and speed trade-off and the
 recommended setting. Options:
 
-- **Picture:** colour speckles, grain denoise (Off/Light/Medium/Strong), sharpen, AI or standard upscaling,
-  AI model, **AI resolution** (full size, or 1080p then scaled up: about 45% less AI work),
+- **Upscaling:** **No upscaling** (keep the recording's own size; everything else still applies),
+  standard resize, or an AI model, and **AI resolution** (full size, or 1080p then scaled up: about 45% less AI work),
+- **Picture:** colour speckles, grain denoise (Off/Light/Medium/Strong), sharpen,
   **Smooth 60 fps** (RIFE; also in the Enhance menu) and **60 fps detail** (Standard or the slower High-detail).
 - **Speed:** **work on several steps at once** (frames are prepared, AI-upscaled and encoded in parallel),
   **prepare frames on all processor cores** (also splits the Quick export into parallel parts), and
   **denoise on the graphics card** (Medium/Strong via Vulkan, with automatic fallback to the processor).
-- **Output:** 1080p / 1440p (recommended: YouTube encodes 1440p uploads better) / 4K, and the video codec.
+- **Output:** 1080p / 1440p (recommended: video sites encode 1440p uploads better) / 4K, and the video codec.
   Encoding uses NVIDIA NVENC, AMD AMF or Intel QSV when available, with CPU fallbacks.
 
 The finished MP4 carries the chapter markers, and the chapter list is saved next to it.
 The **estimated time** panel shows how long the export will take and what runs on the processor and the
 graphics card. The speed of each stage is measured on every preview and export and remembered, so the
-estimate (and the time left while exporting) fits the PC. **Compare frame** shows a before/after picture;
+estimate (and the time left while exporting) fits the PC. **Compare frame...** shows the same moment with several setups side by side (your setup, each clean-up model
+on its own, other upscalers, no upscaling); click one to use it;
 **Render 10 s preview** renders a short sample (and measures the speed). Settings are remembered between runs.
 
 ## How static is told apart from weak signal
@@ -179,13 +183,13 @@ Files:
 | File | Contents |
 |---|---|
 | `dvr_core.py` | Analysis, classification, STATS detection, lossless export (FFmpeg stream copy), report, diagnostics |
-| `enhance.py` | Enhance for YouTube pipeline (filters, AI upscale, 60 fps, GPU encoding, parallel/overlapped stages, speed estimates) |
+| `enhance.py` | Enhance video pipeline (filters, AI upscale, 60 fps, GPU encoding, parallel/overlapped stages, speed estimates) |
 | `fpv_dvr_stitcher.py` | The Tkinter desktop app (timeline editing, menus, shortcuts) |
 | `player.py` | The preview player |
 | `chapters_ui.py` | The Chapters window |
 | `repair.py` | Broken-frame replacement and line repair |
 | `models.py` | Clean-up / upscaling model catalog, downloads, ONNX Runtime runner |
-| `enhance_ui.py` | The Enhance for YouTube window (hover help, estimate panel) |
+| `enhance_ui.py` | The Enhance video window (hover help, estimate panel, Compare window) |
 | `tools/convert_models.py` | Converts the catalog's models to ONNX (used by the build) |
 | `tests/smoke_test.py` | End-to-end self-test |
 | `.github/workflows/build.yml` | Converts the models, Windows build: test, build both .exe versions, assemble the AI add-on, test the .exe files, attach to releases |

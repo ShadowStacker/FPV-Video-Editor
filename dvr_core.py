@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak
@@ -975,7 +975,7 @@ def reset_edits(s: Session) -> None:
 # ---------------------------------------------------------------------------
 # Chapters
 # ---------------------------------------------------------------------------
-YT_MIN_CHAPTERS, YT_MIN_LEN = 3, 10.0
+DESC_MIN_CHAPTERS, DESC_MIN_LEN = 3, 10.0
 
 
 def add_chapter(s: Session, t: float, name: str = "") -> Chapter:
@@ -1037,35 +1037,36 @@ def chapter_list(s: Session, keep: np.ndarray | None = None) -> list[dict]:
     return merged
 
 
-def youtube_text(chapters: list[dict]) -> str:
+def description_text(chapters: list[dict]) -> str:
     return "\n".join(f"{fmt_time(c['out'])} {c['name']}" for c in chapters)
 
 
-def youtube_checks(chapters: list[dict]) -> list[tuple[bool, str]]:
-    """(ok, message) lines: does YouTube accept these as chapters?"""
+def description_checks(chapters: list[dict]) -> list[tuple[bool, str]]:
+    """(ok, message) lines: will video sites show these as chapters when pasted into a description?
+    (first at 00:00, at least 3 chapters, each at least 10 s)"""
     msgs = []
-    if len(chapters) < YT_MIN_CHAPTERS:
-        msgs.append((False, f"YouTube needs at least {YT_MIN_CHAPTERS} chapters; with {len(chapters)} it shows none."))
+    if len(chapters) < DESC_MIN_CHAPTERS:
+        msgs.append((False, f"Chapters in a video description need at least {DESC_MIN_CHAPTERS}; with {len(chapters)} none are shown."))
     for c in chapters:
-        if c["len"] < YT_MIN_LEN:
-            msgs.append((False, f'"{c["name"]}" is {c["len"]:.1f} s long; YouTube needs at least '
-                                f'{YT_MIN_LEN:.0f} s per chapter.'))
+        if c["len"] < DESC_MIN_LEN:
+            msgs.append((False, f'"{c["name"]}" is {c["len"]:.1f} s long; each chapter needs at least '
+                                f'{DESC_MIN_LEN:.0f} s.'))
         if c["moved"]:
             msgs.append((False, f'"{c["name"]}" was in a cut part, so it starts at the next kept moment.'))
     if not msgs:
-        msgs.append((True, f"Ready for YouTube: {len(chapters)} chapters, first at 00:00, "
-                           f"all at least {YT_MIN_LEN:.0f} s."))
+        msgs.append((True, f"Ready to paste: {len(chapters)} chapters, first at 00:00, "
+                           f"all at least {DESC_MIN_LEN:.0f} s."))
     return msgs
 
 
 def save_chapters_txt(s: Session, video_path: str, keep: np.ndarray | None = None) -> str | None:
-    """<video>_chapters.txt: the chapter list ready to paste into a YouTube description."""
+    """<video>_chapters.txt: the chapter list ready to paste into a video description."""
     ch = chapter_list(s, keep)
     if not ch:
         return None
     path = os.path.splitext(video_path)[0] + "_chapters.txt"
-    text = youtube_text(ch) + "\n"
-    notes = [m for ok, m in youtube_checks(ch) if not ok]
+    text = description_text(ch) + "\n"
+    notes = [m for ok, m in description_checks(ch) if not ok]
     if notes:
         text += "\n" + "\n".join("Note: " + m for m in notes) + "\n"
     with open(path, "w", encoding="utf-8") as fh:

@@ -12,8 +12,8 @@ post-flight STATS screen before two of the three power-offs. Then it checks that
   * MKV export gets one chapter per flight and the report is written,
   * the diagnostics zip is complete and its sample frames are exact copies,
   * editing (moving a cut, splitting, Keep/Cut, undo) and chapters (flights, your own,
-    renamed, YouTube description text) work, and chapters reach MKV and MP4 exports,
-  * "Enhance for YouTube" produces a video of the right size and length, replaces the
+    renamed, description text) work, and chapters reach MKV and MP4 exports,
+  * "Enhance video" produces a video of the right size and length, replaces the
     broken frame planted in the fake footage, runs ONNX models (tiny stand-in models)
     (and, off Windows, that the AI path works with stand-in AI tools).
 
@@ -22,6 +22,7 @@ Run:  python tests/smoke_test.py [folder-to-keep-the-fake-clips-in]
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import io
 import json
@@ -152,7 +153,7 @@ def tiny_models(d: str) -> str | None:
     up2 = helper.make_graph([helper.make_node("Resize", ["input", "", "scales"], ["output"], mode="nearest")],
                             "up2", [inp], [out],
                             [helper.make_tensor("scales", TensorProto.FLOAT, [4], [1, 1, 2, 2])])
-    for g, mid in ((ident, "bleedout"), (up2, "vhs2hd")):
+    for g, mid in ((ident, "bleedout"), (ident, "dotzilla"), (up2, "vhs2hd")):
         m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
         m.ir_version = 8
         onnx.save(m, os.path.join(root, f"model-{mid}.onnx"))
@@ -265,7 +266,7 @@ def main() -> int:
         check(len([c for c in chap.splitlines() if c.strip()]) == 3, "MKV has 3 flight chapters")
         txt = os.path.join(d, "stitched_chapters.txt")
         check(os.path.isfile(txt) and open(txt, encoding="utf-8").read().startswith("00:00 Flight 1"),
-              "chapter list for YouTube saved next to the video")
+              "chapter list saved next to the video")
 
         # ---- editing by hand -------------------------------------------------
         print("Editing cuts and chapters...")
@@ -297,9 +298,9 @@ def main() -> int:
               f"chapter list {names}")
         moved = [c for c in cl if c["id"] == c_cut.id]
         check(bool(moved) and moved[0]["moved"], "a chapter in a cut part moves to the next kept moment")
-        yt = dc.youtube_text(cl).splitlines()
-        check(yt[0].startswith("00:00 ") and len(yt) == len(cl), f"YouTube text: {yt}")
-        check(any(not ok for ok, _ in dc.youtube_checks(cl)), "YouTube checks flag short/moved chapters")
+        yt = dc.description_text(cl).splitlines()
+        check(yt[0].startswith("00:00 ") and len(yt) == len(cl), f"description text: {yt}")
+        check(any(not ok for ok, _ in dc.description_checks(cl)), "description checks flag short/moved chapters")
         out = os.path.join(d, "edited.mkv")
         dc.export_video(s, out)
         chap = subprocess.run([dc.tool("ffprobe"), "-v", "error", "-show_chapters", "-show_entries",
@@ -341,7 +342,7 @@ def main() -> int:
                     exact += 1
             check(exact == len(frames), f"sample frames byte-identical to the originals ({exact}/{len(frames)})")
 
-        # ---- enhance for YouTube -------------------------------------------
+        # ---- enhance video -------------------------------------------------
         print("Enhance (quick, no AI, parallel parts)...")
         es = en.EnhanceSettings()
         en.apply_preset(es, "quick")
@@ -350,7 +351,7 @@ def main() -> int:
               "Quick preset with all speed options on")
         e = en.estimate(s, es)
         check(e["total"] > 0 and e["frames"] > 0, f"time estimate works ({en.fmt_minutes(e['total'])})")
-        r = en.enhance(s, os.path.join(d, "youtube.mp4"), es)
+        r = en.enhance(s, os.path.join(d, "enhanced.mp4"), es)
         p = probe(r["path"])
         check(p["w"] == 1440 and p["h"] == 1080 and abs(p["dur"] - s.kept_duration()) < 0.2,
               f"enhanced video {p['w']}x{p['h']}, {p['dur']:.2f}s (kept {s.kept_duration():.2f}s) via {r['encoder']}, "
@@ -394,15 +395,34 @@ def main() -> int:
             check(png[:8] == b"\x89PNG\r\n\x1a\n", "comparison picture with the clean-up model")
             e = en.estimate(s, es_m)
             check(e["clean"] > 0, f"estimate includes the clean-up model ({en.fmt_minutes(e['clean'])})")
+            es_m.cleanup = "dotzilla,bleedout"
+            check(en.cleanups(es_m) == ["bleedout", "dotzilla"], "several clean-up models, run in the list's order")
+            r = en.enhance(s, os.path.join(d, "clean2.mp4"), es_m, t_range=(t_glitch - 2, t_glitch + 2))
+            p = probe(r["path"])
+            check(abs(p["dur"] - r["duration"]) < 0.15, f"two clean-up models in a row: {p['dur']:.2f}s")
+            from PIL import Image
+            tiles = [en.compare_tile(s, t_glitch - 1, v) for v in (None, es_m, dataclasses.replace(es_m, cleanup=""))]
+            sizes = {Image.open(io.BytesIO(t)).size for t in tiles}
+            check(len(sizes) == 1 and next(iter(sizes))[0] == en.TILE_W, f"comparison tiles all the same size {sizes}")
         else:
             print("  skip  ONNX model tests (pip install onnx to run them)")
+
+        es_k = en.EnhanceSettings()
+        en.apply_preset(es_k, "balanced")
+        es_k.keep_size, es_k.cleanup, es_k.sharpen = True, "", 1
+        r = en.enhance(s, os.path.join(d, "keep_size.mp4"), es_k, t_range=(t_glitch - 2, t_glitch + 2))
+        p = probe(r["path"])
+        check((p["w"], p["h"]) == (640, 480) and abs(p["dur"] - r["duration"]) < 0.15,
+              f"No upscaling keeps the original size: {p['w']}x{p['h']} (AI add-on not needed)")
+        check("crashed" in en.exit_text(-1073741819) and "crashed" in en.exit_text(0xC0000005),
+              f"crash exit codes are explained ({en.exit_text(0xC0000005)})")
         back = en.settings_from_dict(en.settings_dict(es))
         check(back == es, "enhance settings survive saving and loading")
 
         if en.gpu_denoise_works():
             es.denoise = 3
             t0 = s.segments[1].t0 + 1
-            r = en.enhance(s, os.path.join(d, "youtube_gpudn.mp4"), es, t_range=(t0, t0 + 3))
+            r = en.enhance(s, os.path.join(d, "enhanced_gpudn.mp4"), es, t_range=(t0, t0 + 3))
             p = probe(r["path"])
             check(r["gpu_denoise"] and abs(p["dur"] - 3) < 0.15, f"graphics-card denoise: {p['dur']:.2f}s")
         else:
@@ -420,16 +440,22 @@ def main() -> int:
                 es.fps60, es.height = True, 1440
                 for k, v in kw.items():
                     setattr(es, k, v)
-                r = en.enhance(s, os.path.join(d, "youtube_ai.mp4"), es, t_range=(t0, t0 + 25))
+                r = en.enhance(s, os.path.join(d, "enhanced_ai.mp4"), es, t_range=(t0, t0 + 25))
                 p = probe(r["path"])
                 want = r["duration"]
                 check(p["w"] == 1920 and p["h"] == 1440 and abs(p["fps"] - 60) < 0.01 and abs(p["dur"] - want) < 0.15,
                       f"AI path ({name}): {p['w']}x{p['h']} at {p['fps']:.0f} fps, {p['dur']:.2f}s of {want:.2f}s")
+            one = os.path.join(d, "rife1")
+            os.makedirs(one, exist_ok=True)
+            shutil.copy(os.path.join(d, "stats.png"), os.path.join(one, "00000001.jpg"))
+            en._interpolate(one, os.path.join(d, "rife1_out"), 3, False)
+            check(sorted(os.listdir(os.path.join(d, "rife1_out"))) == ["00000001.jpg", "00000002.jpg", "00000003.jpg"],
+                  "a one-frame batch never goes to RIFE (it crashes on one picture)")
             if mdir:
                 es = en.EnhanceSettings()
                 en.apply_preset(es, "balanced")
                 es.ai_model, es.cleanup, es.height = "vhs2hd", "bleedout", 960
-                r = en.enhance(s, os.path.join(d, "youtube_onnx.mp4"), es, t_range=(t_glitch - 8, t_glitch + 8))
+                r = en.enhance(s, os.path.join(d, "enhanced_onnx.mp4"), es, t_range=(t_glitch - 8, t_glitch + 8))
                 p = probe(r["path"])
                 check(p["w"] == 1280 and p["h"] == 960 and abs(p["dur"] - r["duration"]) < 0.15
                       and r.get("replaced", 0) >= 1,

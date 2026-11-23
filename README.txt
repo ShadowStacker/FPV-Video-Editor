@@ -15,21 +15,24 @@ seconds to export.
 
 You can fine-tune every cut on the timeline (drag it, or type a time), play
 the result in the preview, and add your own chapters, which go into MKV/MP4
-exports and into a ready-to-paste chapter list for YouTube.
+exports and into a chapter list ready to paste into a video description.
 
-"Enhance for YouTube" is a separate export that repairs broken frames and
-streaks from breakup, cleans up the picture (rainbow colour noise, grain,
-optionally with a clean-up AI model), upscales it (optionally with AI on the
-graphics card), can smooth it to 60 fps, and saves a 1440p MP4 ready to upload.
+"Enhance video" is a separate export that repairs broken frames and streaks
+from breakup, cleans up the picture (rainbow colour noise, grain, optionally
+with clean-up AI models), upscales it (optionally with AI on the graphics
+card) or keeps the original size, can smooth it to 60 fps, and saves an MP4.
 
 
 GETTING IT (Windows 10/11)
 --------------------------
 Download from  https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest
-  FPV-DVR-Stitcher.exe          One file with everything built in - just run
-                                it. Takes a few seconds to open. Downloads the
-                                AI add-on (~70 MB) the first time you use AI.
-  FPV-DVR-Stitcher-windows.zip  Same program, starts faster, AI add-on included.
+(the file names carry the version, for example 1.4.0)
+  FPV-DVR-Stitcher-1.4.0.exe          One file with everything built in - just
+                                      run it. Takes a few seconds to open.
+                                      Downloads the AI add-on (~70 MB) the
+                                      first time you use AI.
+  FPV-DVR-Stitcher-1.4.0-windows.zip  Same program, starts faster, AI add-on
+                                      included.
                                 Unzip and run "FPV DVR Stitcher.exe", keeping
                                 the other files and the "ai" folder next to it.
 No install or Python needed. You can make a desktop shortcut to the .exe.
@@ -63,7 +66,7 @@ USING IT
    and CUT.
 4. Fine-tune the cuts if you like (see EDITING below).
 5. Press "2. Export video..." for the original-quality video, and/or
-   "3. Enhance for YouTube..." for an upload-ready 1440p MP4.
+   "3. Enhance video..." for a cleaned-up MP4 ready to upload.
 
 
 EDITING AND PLAYING
@@ -96,12 +99,12 @@ Edit menu        Also on right-click (timeline or list). Uses the playhead (the
 Chapters         Every flight gets a chapter automatically (green flags above
                  the timeline); your own are purple. Edit > Chapters... lists
                  them with their time in the exported video: rename them, delete
-                 your own, and "Copy for YouTube" copies the list in the format
-                 YouTube reads from a video's DESCRIPTION (YouTube ignores
-                 chapter markers inside the file). YouTube needs the first at
+                 your own, and "Copy chapter list" copies the list in the
+                 format video sites read from a video's DESCRIPTION (they ignore
+                 chapter markers inside the file). They need the first at
                  00:00, at least 3 chapters and each at least 10 s long; the
                  window says if any of that is not met. The same chapters go
-                 into MKV and YouTube MP4 exports, and every export saves them
+                 into MKV and enhanced MP4 exports, and every export saves them
                  next to the video as ..._chapters.txt.
 Changing a setting on the left re-runs the detection: your own cut changes
 are reset, and Edit > Undo brings them back.
@@ -136,18 +139,18 @@ Signal-loss report       Saves a folder next to the video with report.html:
                          plus a lossless clip of the last 20 seconds.
 
 
-ENHANCE FOR YOUTUBE
--------------------
-Open it with "3. Enhance for YouTube..." (or the Enhance menu) after Analyse.
+ENHANCE VIDEO
+-------------
+Open it with "3. Enhance video..." (or the Enhance menu) after Analyse.
 Hover the mouse over any option (or click its ?) for what it does, how it
 affects quality and speed, and the recommended setting.
 Presets:
   Quick            No AI. Repairs, cleans colour speckles and grain, sharpens
                    and upscales to 1440p. About as fast as real time.
   Balanced         Repair, the BleedOut clean-up model, then the Fast AI model
-  (default)        on the graphics card. The recommended choice for YouTube.
+  (default)        on the graphics card. The recommended choice for uploads.
   Best quality     The same with the Detailed AI model: sharpest, slower.
-Repair and clean-up:
+Repair breakup (only touches the places where the signal broke up):
   Replace broken frames  Frames that came out torn, rolled or blown out when the
                    signal broke up (while the frames either side are fine) are
                    replaced: redrawn as in-between frames with RIFE (AI add-on,
@@ -156,7 +159,7 @@ Repair and clean-up:
                    breakups longer than 6 frames stay in.
   Repair lines     Fills in short-lived streak lines and bands of rainbow colour
                    noise across the picture. The OSD is left alone.
-  Clean-up model   An AI model that cleans the picture first, at its own size:
+Clean-up models (run on every frame; tick any number, they run in order):
                      Rainbows & colour bleed (BleedOut) - recommended
                      Dot crawl & rainbows (Dotzilla)
                      Heavy clean-up (Archivist AntiLines) - smooths detail
@@ -165,24 +168,30 @@ Repair and clean-up:
                    community models made for analog / VHS video, which has the
                    same faults. Each is downloaded (1-4 MB) the first time it is
                    used, and runs on the graphics card (DirectX 12).
-Picture options:
-  AI model         Built-in (AI add-on): Fast, Detailed. Downloaded when used:
+Upscaling (pick one):
+  No upscaling     Keeps the recording's own size (e.g. 1280x720). Repair,
+                   clean-up, denoise, sharpening and 60 fps still apply.
+  Standard resize  Ordinary high-quality resize, no AI.
+  AI models        Built-in (AI add-on): Fast, Detailed. Downloaded when used:
                    General x4 - smooth, General x4 - keeps texture (Real-ESRGAN),
                    VHS to HD x2 (best on 720p HD-mode recordings; slow).
   AI resolution    Full size (best), or 1080p then scaled up (~45% less AI work).
+Picture options: colour speckles, grain denoise, sharpen, and
   Smooth 60 fps    AI frame interpolation (RIFE). Also in the Enhance menu.
   60 fps detail    Standard, or High-detail (better on very fast motion, slower).
 Speed options (all on by default, no effect on quality):
   Work on several steps at once   prepares, AI-upscales and encodes in parallel
   Prepare frames on all cores     splits the preparation into parallel parts
   Denoise on the graphics card    Medium/Strong denoise on the GPU
-Size: 1440p is recommended - YouTube encodes 1440p uploads better than 1080p.
+Size: 1440p is recommended - video sites encode 1440p uploads better than 1080p.
 The "Estimated time" panel shows how long the export will take. Each preview
 and export measures this PC's speed, so the estimate gets accurate; run one
 "Render 10 s preview" first. Your settings are remembered between runs.
 Before a long export:
-  Compare frame        before/after picture of the moment shown in the main
-                       window's preview (whole frame + 100% detail).
+  Compare frame...     the moment shown in the main window's preview with
+                       several setups side by side: the original, yours, and
+                       any you add (each clean-up model on its own, other
+                       upscalers, no upscaling). Click one to use it.
   Render 10 s preview  renders 10 seconds from that moment and plays it.
 The AI tools (Real-ESRGAN and RIFE) work on any modern NVIDIA, AMD or Intel
 graphics card, and so do the downloaded models (ONNX Runtime with DirectML).
@@ -218,8 +227,8 @@ Clean-up model is very slow  -> it is running on the processor: the Enhance
                                 graphics card driver (DirectX 12 is needed).
 Model download fails         -> check the internet connection; the models come
                                 from this program's GitHub releases page.
-YouTube shows no chapters    -> paste the chapter list (Edit > Chapters... >
-                                Copy for YouTube, or ..._chapters.txt) into the
+No chapters after uploading -> paste the chapter list (Edit > Chapters... >
+                                Copy chapter list, or ..._chapters.txt) into the
                                 video's description.
 Detection looks wrong on your footage -> after Analyse, use Help > Save
     diagnostics... and send the zip it makes (usually 10-25 MB). It holds the

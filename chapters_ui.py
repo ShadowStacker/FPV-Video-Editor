@@ -2,7 +2,7 @@
 FPV DVR Stitcher - the Chapters window (Edit > Chapters...).
 
 One chapter per flight is added automatically; the user can add their own (right-click >
-Add chapter here), rename any of them and copy the list in the format YouTube reads from a
+Add chapter here), rename any of them and copy the list in the format video sites read from a
 video's description.
 """
 from __future__ import annotations
@@ -43,19 +43,19 @@ class ChaptersWindow(tk.Toplevel):
         self.rows.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
         self.cv.bind("<Configure>", lambda e: self.cv.itemconfigure(self.win, width=e.width))
 
-        ttk.Label(outer, text="For YouTube, paste this into the video's description:").pack(anchor="w")
+        ttk.Label(outer, text="To get chapters on a video site, paste this into the video's description:").pack(anchor="w")
         self.text = tk.Text(outer, height=6, wrap="none", font=("Consolas", 10))
         self.text.pack(fill="x", pady=(2, 4))
         self.msgs = ttk.Frame(outer)
         self.msgs.pack(fill="x")
         btns = ttk.Frame(outer)
         btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns, text="Copy for YouTube", command=self.copy).pack(side="left")
+        ttk.Button(btns, text="Copy chapter list", command=self.copy).pack(side="left")
         self.copied = ttk.Label(btns, text="")
         self.copied.pack(side="left", padx=8)
         ttk.Button(btns, text="Close", command=self.close).pack(side="right")
         ttk.Label(outer, wraplength=520, justify="left", foreground="#555555",
-                  text="The same list goes into MKV and YouTube MP4 exports as chapter markers, and is saved "
+                  text="The same list goes into MKV and enhanced MP4 exports as chapter markers, and is saved "
                        "next to the video as ..._chapters.txt.").pack(fill="x", pady=(8, 0))
         self.refresh()
 
@@ -97,8 +97,8 @@ class ChaptersWindow(tk.Toplevel):
                 row=i, column=4, sticky="w", padx=(0, 6))
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
-        self.text.insert("1.0", dc.youtube_text(chs))
-        for ok, m in dc.youtube_checks(chs) if chs else [(False, "No chapters: nothing is kept.")]:
+        self.text.insert("1.0", dc.description_text(chs))
+        for ok, m in dc.description_checks(chs) if chs else [(False, "No chapters: nothing is kept.")]:
             ttk.Label(self.msgs, text=("✓ " if ok else "⚠ ") + m, foreground=COL_OK if ok else COL_WARN,
                       wraplength=520, justify="left").pack(anchor="w")
 
@@ -124,7 +124,7 @@ class ChaptersWindow(tk.Toplevel):
             return
         chs = dc.chapter_list(s)
         self.text.delete("1.0", "end")
-        self.text.insert("1.0", dc.youtube_text(chs))
+        self.text.insert("1.0", dc.description_text(chs))
 
     def delete(self, c: dict):
         s = self.app.session

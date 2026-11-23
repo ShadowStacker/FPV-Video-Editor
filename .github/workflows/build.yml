@@ -2,11 +2,12 @@ name: Build Windows app
 
 # Every push to main builds and tests the program (download it from the run's
 # "Artifacts"). Publishing a GitHub Release (Releases -> Draft a new release ->
-# new tag such as v1.1.0 -> Publish) builds it again and attaches to the release:
-#   FPV-DVR-Stitcher.exe          single file, FFmpeg built in - just run it
-#                                 (downloads the AI add-on the first time AI is used)
-#   FPV-DVR-Stitcher-windows.zip  same program + FFmpeg + AI add-on as separate files
-#   FPV-DVR-Stitcher-AI-addon.zip Real-ESRGAN upscaler + RIFE frame interpolation
+# new tag v<APP_VERSION from dvr_core.py>, e.g. v1.4.0 -> Publish) builds it again and
+# attaches to the release (<ver> = the program's version):
+#   FPV-DVR-Stitcher-<ver>.exe          single file, FFmpeg built in - just run it
+#                                       (downloads the AI add-on the first time AI is used)
+#   FPV-DVR-Stitcher-<ver>-windows.zip  same program + FFmpeg + AI add-on as separate files
+#   FPV-DVR-Stitcher-<ver>-AI-addon.zip Real-ESRGAN upscaler + RIFE frame interpolation
 #   model-<name>.onnx             clean-up and extra upscaling models (converted from the
 #                                 originals by the "models" job; downloaded by the app when used)
 on:
@@ -80,6 +81,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller onnx
 
+      - name: Program version
+        run: |
+          $v = python -c "import dvr_core; print(dvr_core.APP_VERSION)"
+          "VER=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "Version $v"
+          if ("${{ github.event_name }}" -eq "release" -and "${{ github.event.release.tag_name }}" -ne "v$v") {
+            throw "The release tag ${{ github.event.release.tag_name }} does not match the program's version v$v (APP_VERSION in dvr_core.py)."
+          }
+
       - name: Download FFmpeg
         run: |
           $ProgressPreference = 'SilentlyContinue'
@@ -135,8 +145,8 @@ jobs:
                          'ai\rife\rife-ncnn-vulkan.exe', 'ai\rife\rife-v4.6') {
             if (-not (Test-Path $p)) { throw "AI add-on is missing $p" }
           }
-          Compress-Archive -Path 'ai' -DestinationPath 'FPV-DVR-Stitcher-AI-addon.zip' -Force
-          Get-Item 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
+          Compress-Archive -Path 'ai' -DestinationPath "FPV-DVR-Stitcher-$env:VER-AI-addon.zip" -Force
+          Get-Item "FPV-DVR-Stitcher-$env:VER-AI-addon.zip" | Format-Table Name, Length
 
       - name: Self-test (detection, editing, chapters, lossless export, diagnostics, repair, enhance)
         run: python tests/smoke_test.py test_clips
@@ -154,7 +164,7 @@ jobs:
 
       - name: Build .exe (single-file version, FFmpeg built in)
         run: >-
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV-DVR-Stitcher"
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV-DVR-Stitcher-${{ env.VER }}"
           --workpath build_standalone
           --collect-binaries onnxruntime --hidden-import PIL._tkinter_finder
           --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" --add-binary "ffmpeg\ffprobe.exe;ffmpeg"
@@ -162,16 +172,16 @@ jobs:
 
       - name: Assemble downloads
         run: |
-          $pkg = 'FPV-DVR-Stitcher'
+          $pkg = "FPV-DVR-Stitcher-$env:VER"
           New-Item -ItemType Directory -Force $pkg | Out-Null
           Copy-Item 'dist\FPV DVR Stitcher.exe', 'ffmpeg\ffmpeg.exe', 'ffmpeg\ffprobe.exe', 'README.txt' $pkg
           if (Test-Path 'ffmpeg\FFMPEG-LICENSE.txt') { Copy-Item 'ffmpeg\FFMPEG-LICENSE.txt' $pkg }
           Copy-Item 'ai' $pkg -Recurse
-          Compress-Archive -Path $pkg -DestinationPath 'FPV-DVR-Stitcher-windows.zip' -Force
+          Compress-Archive -Path $pkg -DestinationPath "FPV-DVR-Stitcher-$env:VER-windows.zip" -Force
           # the single-file .exe is tested from an empty folder so it must use its built-in FFmpeg
           New-Item -ItemType Directory -Force standalone | Out-Null
-          Copy-Item 'dist\FPV-DVR-Stitcher.exe' standalone
-          Get-ChildItem 'standalone\FPV-DVR-Stitcher.exe', 'FPV-DVR-Stitcher-windows.zip', 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
+          Copy-Item "dist\FPV-DVR-Stitcher-$env:VER.exe" standalone
+          Get-ChildItem "standalone\FPV-DVR-Stitcher-$env:VER.exe", "FPV-DVR-Stitcher-$env:VER-windows.zip", "FPV-DVR-Stitcher-$env:VER-AI-addon.zip" | Format-Table Name, Length
 
       - name: Test both .exe files (open, find FFmpeg, analyse, edit, play, export, enhance, run a model)
         env:
@@ -184,7 +194,7 @@ jobs:
             $t = Get-Date
             $p = Start-Process -FilePath $exePath -ArgumentList $argList -PassThru
             if (-not $p.WaitForExit(600000)) {
-              Get-Process 'FPV DVR Stitcher', 'FPV-DVR-Stitcher' -ErrorAction SilentlyContinue | Stop-Process -Force
+              Get-Process 'FPV DVR Stitcher', "FPV-DVR-Stitcher-$env:VER" -ErrorAction SilentlyContinue | Stop-Process -Force
               throw "$name did not finish its self-test (crashed or hung)."
             }
             "--- $name finished in $([int]((Get-Date) - $t).TotalSeconds) s"
@@ -192,8 +202,8 @@ jobs:
             Get-Content $report
             if (-not (Select-String -Path $report -Pattern 'SELFTEST OK' -Quiet)) { throw "$name failed its self-test." }
           }
-          Test-Exe 'FPV-DVR-Stitcher\FPV DVR Stitcher.exe' 'zip'
-          Test-Exe 'standalone\FPV-DVR-Stitcher.exe' 'single'
+          Test-Exe "FPV-DVR-Stitcher-$env:VER\FPV DVR Stitcher.exe" 'zip'
+          Test-Exe "standalone\FPV-DVR-Stitcher-$env:VER.exe" 'single'
           if (-not (Select-String -Path 'selftest_single.txt' -Pattern '^ffmpeg: .*_MEI' -Quiet)) {
             throw 'The single-file .exe did not use its built-in FFmpeg.'
           }
@@ -208,17 +218,17 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: FPV-DVR-Stitcher-single-exe
-          path: standalone/FPV-DVR-Stitcher.exe
+          name: FPV-DVR-Stitcher-${{ env.VER }}-single-exe
+          path: standalone/FPV-DVR-Stitcher-${{ env.VER }}.exe
 
       - uses: actions/upload-artifact@v5
         with:
-          name: FPV-DVR-Stitcher-windows
-          path: FPV-DVR-Stitcher/
+          name: FPV-DVR-Stitcher-${{ env.VER }}-windows
+          path: FPV-DVR-Stitcher-${{ env.VER }}/
 
       - uses: actions/upload-artifact@v5
         with:
-          name: FPV-DVR-Stitcher-AI-addon
+          name: FPV-DVR-Stitcher-${{ env.VER }}-AI-addon
           path: ai/
 
       - name: Attach downloads to the release
@@ -227,5 +237,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh release upload "${{ github.event.release.tag_name }}"
-          'standalone\FPV-DVR-Stitcher.exe' 'FPV-DVR-Stitcher-windows.zip' 'FPV-DVR-Stitcher-AI-addon.zip'
+          "standalone\FPV-DVR-Stitcher-${{ env.VER }}.exe" "FPV-DVR-Stitcher-${{ env.VER }}-windows.zip"
+          "FPV-DVR-Stitcher-${{ env.VER }}-AI-addon.zip"
           --clobber --repo "${{ github.repository }}"
