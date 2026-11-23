@@ -7,6 +7,10 @@ Cleans up analog FPV footage and exports a high-resolution MP4 for upload:
   optional smooth 60 fps (AI frame interpolation with RIFE),
   encoding on the graphics card (NVIDIA NVENC / AMD AMF / Intel QSV) with CPU fallbacks.
 
+Repair: broken frames (torn / rolled / blown out by breakup) are replaced and short-lived
+streak lines and colour-noise bands are filled in (repair.py), and an optional clean-up
+model removes the rainbow colour noise of composite video (models.py, ONNX Runtime).
+
 Speed: frames are prepared in parallel parts on all processor cores, and preparing,
 AI work and encoding overlap instead of running one after another. Measured speeds
 are remembered (speed.json) so time estimates fit the PC.
@@ -16,6 +20,7 @@ as an add-on: in the zip download next to the program, or downloaded on first us
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import os
@@ -32,6 +37,8 @@ from dataclasses import dataclass, fields
 import numpy as np
 
 import dvr_core as dc
+import models as mdl
+import repair
 
 AI_ADDON_URL = ("https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest/download/"
                 "FPV-DVR-Stitcher-AI-addon.zip")
@@ -51,8 +58,11 @@ class EnhanceSettings:
     speckle: bool = True         # clean the rainbow colour speckles of analog video
     denoise: int = 1             # grain denoise: 0 off, 1 light, 2 medium, 3 strong
     sharpen: int = 0             # 0 off, 1 light, 2 medium
-    ai_upscale: bool = True      # Real-ESRGAN (else standard Lanczos)
-    ai_model: str = "fast"       # fast (realesr-animevideov3) | detailed (realesrgan-x4plus)
+    fix_broken: bool = True      # replace broken frames (torn / rolled / blown out by breakup)
+    fix_lines: bool = True       # fill in short-lived streak lines and colour-noise bands
+    cleanup: str = "bleedout"    # clean-up model (models.CATALOG id) or "" for none
+    ai_upscale: bool = True      # AI upscaling (else standard Lanczos)
+    ai_model: str = "fast"       # fast | detailed (built-in) or an upscaler id from models.CATALOG
     ai_res: str = "full"         # full: AI makes the output size | 1080: AI makes 1080p, then resize
     fps60: bool = False          # smooth 60 fps with RIFE frame interpolation
     fps_detail: str = "std"      # std | hd (RIFE high-resolution mode, slower)
@@ -65,10 +75,14 @@ class EnhanceSettings:
 
 
 PRESETS = {
-    "quick": dict(speckle=True, denoise=1, sharpen=1, ai_upscale=False, ai_model="fast", ai_res="full"),
-    "balanced": dict(speckle=True, denoise=1, sharpen=0, ai_upscale=True, ai_model="fast", ai_res="full"),
-    "best": dict(speckle=True, denoise=1, sharpen=0, ai_upscale=True, ai_model="detailed", ai_res="full"),
+    "quick": dict(speckle=True, denoise=1, sharpen=1, fix_broken=True, fix_lines=True, cleanup="",
+                  ai_upscale=False, ai_model="fast", ai_res="full"),
+    "balanced": dict(speckle=True, denoise=1, sharpen=0, fix_broken=True, fix_lines=True, cleanup="bleedout",
+                     ai_upscale=True, ai_model="fast", ai_res="full"),
+    "best": dict(speckle=True, denoise=1, sharpen=0, fix_broken=True, fix_lines=True, cleanup="bleedout",
+                 ai_upscale=True, ai_model="detailed", ai_res="full"),
 }
+BUILTIN_UPSCALERS = {"fast": "Fast (built-in, anime-video model)", "detailed": "Detailed (built-in, Real-ESRGAN x4plus)"}
 PRESET_ALIASES = {"youtube": "best"}
 
 
@@ -100,6 +114,10 @@ def settings_from_dict(d: dict) -> EnhanceSettings:
         if v is not None and isinstance(v, type(getattr(es, f.name))):
             setattr(es, f.name, v)
     es.preset = PRESET_ALIASES.get(es.preset, es.preset)
+    if es.cleanup and es.cleanup not in mdl.BY_ID:
+        es.cleanup = ""
+    if es.ai_model not in BUILTIN_UPSCALERS and es.ai_model not in mdl.BY_ID:
+        es.ai_model = "fast"
     return es
 
 
@@ -288,6 +306,48 @@ def uses_gpu_denoise(es: EnhanceSettings) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Models and repair
+# ---------------------------------------------------------------------------
+def ai_scale(es: EnhanceSettings) -> int:
+    m = mdl.BY_ID.get(es.ai_model)
+    return m.scale if m else 4
+
+
+def uses_ncnn_upscaler(es: EnhanceSettings) -> bool:
+    return es.ai_upscale and es.ai_model in BUILTIN_UPSCALERS
+
+
+def needs_addon(es: EnhanceSettings) -> bool:
+    """The AI add-on (Real-ESRGAN / RIFE programs) is needed for the built-in upscalers and 60 fps."""
+    return uses_ncnn_upscaler(es) or es.fps60
+
+
+def models_needed(es: EnhanceSettings) -> list[str]:
+    ids = [es.cleanup] if es.cleanup else []
+    if es.ai_upscale and es.ai_model in mdl.BY_ID:
+        ids.append(es.ai_model)
+    return ids
+
+
+def missing_models(es: EnhanceSettings) -> list[str]:
+    return [m for m in models_needed(es) if not mdl.installed(m)]
+
+
+def needs_frames(es: EnhanceSettings) -> bool:
+    """Does the export pass every frame through the program (repair / clean-up model)?"""
+    return es.fix_broken or es.fix_lines or bool(es.cleanup)
+
+
+def check_ready(es: EnhanceSettings) -> None:
+    if needs_addon(es) and not ai_installed():
+        raise RuntimeError("The built-in AI upscalers and smooth 60 fps need the AI add-on.\n"
+                           "Use Enhance > Download AI add-on, or switch them off.")
+    miss = missing_models(es)
+    if miss:
+        raise RuntimeError("Download the model first: " + ", ".join(mdl.BY_ID[m].name for m in miss))
+
+
+# ---------------------------------------------------------------------------
 # Sizes and filters
 # ---------------------------------------------------------------------------
 def output_size(s: dc.Session, height: int) -> tuple[int, int]:
@@ -303,10 +363,11 @@ def ai_out_height(es: EnhanceSettings) -> int:
 def work_size(s: dc.Session, es: EnhanceSettings) -> tuple[int, int]:
     """Resolution the frames are cleaned at (and handed to the AI tools)."""
     ow, oh = output_size(s, es.height)
-    if es.ai_upscale:                       # the AI upscales 4x
+    if es.ai_upscale:                       # the AI upscales 4x (2x for some models)
+        k = ai_scale(es)
         ah = ai_out_height(es)
         aw = int(round(ah * ow / oh / 2)) * 2
-        return int(round(aw / 4 / 2)) * 2, int(round(ah / 4 / 2)) * 2
+        return int(round(aw / k / 2)) * 2, int(round(ah / k / 2)) * 2
     c = s.clips[0]
     w, h = (c.width or 640), (c.height or 480)
     if h > oh:
@@ -314,12 +375,33 @@ def work_size(s: dc.Session, es: EnhanceSettings) -> tuple[int, int]:
     return w - w % 2, h - h % 2
 
 
+CLEAN_MAX_H = 720       # the clean-up model works on the recording's own size, up to 720p
+
+
+def clean_size(s: dc.Session) -> tuple[int, int]:
+    c = s.clips[0]
+    w, h = (c.width or 640), (c.height or 480)
+    if h > CLEAN_MAX_H:
+        w, h = int(round(w * CLEAN_MAX_H / h / 2)) * 2, CLEAN_MAX_H
+    return w - w % 2, h - h % 2
+
+
+def stage_size(s: dc.Session, es: EnhanceSettings) -> tuple[int, int]:
+    """Resolution the repair and clean-up step works at."""
+    return clean_size(s) if es.cleanup else work_size(s, es)
+
+
 def pre_filters(s: dc.Session, es: EnhanceSettings, fps: float, gpu_dn: bool = False) -> list[str]:
     ww, wh = work_size(s, es)
     c = s.clips[0]
-    f = [f"fps={fps:.6f}"]                  # constant frame rate (DVRs skip frames)
+    f = ["setpts=PTS-STARTPTS", f"fps={fps:.6f}"]     # constant frame rate from the first frame (DVRs skip frames)
     if (ww, wh) != (c.width, c.height):
         f.append(f"scale={ww}:{wh}:flags=area")
+    return f + clean_filters(es, gpu_dn)
+
+
+def clean_filters(es: EnhanceSettings, gpu_dn: bool = False) -> list[str]:
+    f = []
     if es.speckle:                           # composite-video rainbow speckles live in the colour planes
         f += ["gblur=sigma=1.2:planes=6", "atadenoise=p=6:s=9:1a=0.06:1b=0.15:2a=0.06:2b=0.15"]
     nl = None
@@ -399,32 +481,46 @@ def _keys(s: dc.Session, es: EnhanceSettings, enc: str) -> dict:
     ww, wh = work_size(s, es)
     gpu = uses_gpu_denoise(es)
     rife_h = ai_out_height(es) if es.ai_upscale else wh
+    rep = f"{int(es.fix_broken)}{int(es.fix_lines)}{es.cleanup or '-'}"
     return {
-        "prep": f"prep|{es.speckle}|{es.denoise}|{gpu}|{workers(es)}|{wh}",
+        "prep": f"prep|{es.speckle}|{es.denoise}|{gpu}|{workers(es)}|{wh}|{rep}",
+        "clean": f"clean|{es.cleanup}|{stage_size(s, es)[1]}",
         "up": f"up|{es.ai_model}|{ai_out_height(es)}",
         "rife": f"rife|{es.fps_detail}|{rife_h}",
         "enc": f"enc|{enc}|{es.height}",
-        "quick": f"quick|{es.speckle}|{es.denoise}|{gpu}|{quick_parts(es, enc)}|{es.height}|{es.sharpen}|{enc}",
+        "quick": f"quick|{es.speckle}|{es.denoise}|{gpu}|{quick_parts(es, enc)}|{es.height}|{es.sharpen}|{enc}|{rep}",
     }
 
 
 def _defaults(s: dc.Session, es: EnhanceSettings) -> dict:
     """First-guess speeds (before anything was measured on this PC), sized for an RTX 4070 class GPU.
-    Units: prep = frames/s, up = s/frame, rife = s/output frame, enc = frames/s, quick = s per s of video."""
+    Units: prep = frames/s, clean/up = s/frame, rife = s/output frame, enc = frames/s,
+    quick = s per s of video."""
     ww, wh = work_size(s, es)
     pix = (ww * wh) / (640 * 360)
     cpu_cost = 1.0 + (0.3 if es.speckle else 0) + {0: 0, 1: 0.5, 2: 6.0, 3: 15.0}[min(3, es.denoise)]
     if uses_gpu_denoise(es):
         cpu_cost = 1.3 + (0.3 if es.speckle else 0)
-    cpu_cost *= max(0.3, pix) / (2.5 if es.all_cores else 1.0)
+    cpu_cost *= max(0.3, pix)
+    if needs_frames(es):          # frames pass through the program (copying, repair)
+        sw, sh = stage_size(s, es)
+        cpu_cost += (0.4 + (0.8 if es.fix_lines else 0) + (0.2 if es.fix_broken else 0)) * (sw * sh) / (640 * 360)
+    cpu_cost /= (2.5 if es.all_cores else 1.0)
     prep_fps = 10200 / (cpu_cost * 60)
+    sw, sh = stage_size(s, es)
+    cm = mdl.BY_ID.get(es.cleanup)
+    clean = cm.cost * sw * sh / 1e6 if cm else 0.0
     ah = ai_out_height(es)
-    up = (0.3235 if es.ai_model == "detailed" else 0.047) * (ah / 1440) ** 2
+    um = mdl.BY_ID.get(es.ai_model)
+    if um:
+        up = um.cost * ww * wh / 1e6
+    else:
+        up = (0.3235 if es.ai_model == "detailed" else 0.047) * (ah / 1440) ** 2
     rh = ah if es.ai_upscale else wh
     rife = 0.0333 * (rh / 1440) ** 2 * (1.7 if es.fps_detail == "hd" else 1.0)
     enc = 10200 / (2.0 * 60) / (es.height / 1440) ** 2
-    quick = max(0.35, cpu_cost / 6 + 0.4 * (es.height / 1440) ** 2)
-    return {"prep": prep_fps, "up": up, "rife": rife, "enc": enc, "quick": quick}
+    quick = max(0.35, cpu_cost * (2.5 if es.all_cores else 1.0) / 6 + 0.4 * (es.height / 1440) ** 2)
+    return {"prep": prep_fps, "clean": clean, "up": up, "rife": rife, "enc": enc, "quick": quick}
 
 
 def estimate(s: dc.Session, es: EnhanceSettings, enc: str = "auto", seconds: float | None = None) -> dict:
@@ -444,25 +540,36 @@ def estimate(s: dc.Session, es: EnhanceSettings, enc: str = "auto", seconds: flo
             measured = measured and m
         return v
 
+    clean = frames * sp("clean") if es.cleanup else 0.0
     if not (es.ai_upscale or es.fps60):
-        t = dur * sp("quick")
-        return {"total": t, "cpu": [("prep", 0, t)], "gpu": [("enc", 0, t)], "measured": measured,
-                "frames": frames, "batches": 1, "prep": t, "up": 0.0, "rife": 0.0, "encode": t}
+        q = dur * sp("quick")
+        t = max(q, clean * 1.05)                 # the model runs alongside the processor work
+        gpu = ([("clean", 0, clean)] if clean else []) + [("enc", 0, t)]
+        return {"total": t, "cpu": [("prep", 0, t)], "gpu": gpu, "measured": measured,
+                "frames": frames, "batches": 1, "prep": t, "clean": clean, "up": 0.0, "rife": 0.0, "encode": t}
     prep = frames / sp("prep", counts=not es.overlap)    # with overlap, preparing hides behind the AI
+    prep_all = max(prep, clean)
     up = frames * sp("up") if es.ai_upscale else 0.0
     rife = out_frames * sp("rife") if es.fps60 else 0.0
     encode = out_frames / sp("enc")
     nb = max(1, math.ceil(frames / CHUNK_FRAMES))
+    lanes_clean = [("clean", 0, clean)] if clean else []
     if es.overlap:
-        start = min(prep, prep / nb + 2.0)
-        end = max(prep, start + up + rife)
-        total = end + encode / nb
-        gpu = [("ai", start, start + up), ("fps", start + up, start + up + rife), ("enc", total - encode / nb, total)]
+        start = min(prep_all, prep_all / nb + 2.0)
+        if clean:                                  # the clean-up model shares the graphics card
+            up_end = max(prep_all, start + up + rife + clean * (1 - 1 / nb))
+        else:
+            up_end = max(prep_all, start + up + rife)
+        total = up_end + encode / nb
+        gpu = lanes_clean + [("ai", up_end - up - rife, up_end - rife), ("fps", up_end - rife, up_end),
+                             ("enc", total - encode / nb, total)]
     else:
-        total = prep + up + rife + encode
-        gpu = [("ai", prep, prep + up), ("fps", prep + up, prep + up + rife), ("enc", prep + up + rife, total)]
+        total = prep_all + up + rife + encode
+        gpu = lanes_clean + [("ai", prep_all, prep_all + up), ("fps", prep_all + up, prep_all + up + rife),
+                             ("enc", prep_all + up + rife, total)]
     return {"total": total, "cpu": [("prep", 0, prep)], "gpu": gpu, "measured": measured,
-            "frames": frames, "batches": nb, "prep": prep, "up": up, "rife": rife, "encode": encode}
+            "frames": frames, "batches": nb, "prep": prep_all, "clean": clean, "up": up, "rife": rife,
+            "encode": encode}
 
 
 def fmt_minutes(sec: float) -> str:
@@ -513,6 +620,9 @@ def _sequence(folder: str, expected: int, what: str) -> None:
 
 
 def _upscale(src: str, dst: str, es: EnhanceSettings, cancel=None) -> None:
+    if es.ai_model in mdl.BY_ID:
+        _upscale_onnx(src, dst, mdl.load(es.ai_model), cancel)
+        return
     exe = find_ai("realesrgan")
     if exe is None:
         raise RuntimeError("AI upscaling needs the AI add-on (Enhance > Download AI add-on).")
@@ -521,6 +631,39 @@ def _upscale(src: str, dst: str, es: EnhanceSettings, cancel=None) -> None:
     _run([exe, "-i", src, "-o", dst, "-n", AI_MODELS.get(es.ai_model, AI_MODELS["fast"]), "-s", "4",
           "-f", "jpg", "-m", os.path.join(os.path.dirname(exe), "models")], cancel, "AI upscaling (Real-ESRGAN)")
     _sequence(dst, n, "AI upscaling")
+
+
+def _upscale_onnx(src: str, dst: str, model, cancel=None) -> None:
+    """Upscale a folder of frames with an ONNX model; pictures are read and written on other
+    threads while the graphics card works."""
+    from concurrent.futures import ThreadPoolExecutor
+    from PIL import Image
+    os.makedirs(dst, exist_ok=True)
+    files = sorted(f for f in os.listdir(src) if f.lower().endswith(".jpg"))
+
+    def load(name):
+        with Image.open(os.path.join(src, name)) as im:
+            return np.asarray(im.convert("RGB"))
+
+    def save(arr, k):
+        Image.fromarray(arr).save(os.path.join(dst, f"{k:08d}.jpg"), quality=95)
+
+    with ThreadPoolExecutor(max_workers=4) as io:
+        ahead = 4
+        loads = [io.submit(load, f) for f in files[:ahead]]
+        saves = []
+        for k in range(len(files)):
+            if cancel is not None and cancel.is_set():
+                raise dc.Cancelled()
+            img = loads[k].result()
+            loads[k] = None
+            if k + ahead < len(files):
+                loads.append(io.submit(load, files[k + ahead]))
+            saves.append(io.submit(save, model.run(img), k + 1))
+            while len(saves) > 8:
+                saves.pop(0).result()
+        for f in saves:
+            f.result()
 
 
 def _interpolate(src: str, dst: str, count: int, uhd: bool, cancel=None) -> None:
@@ -549,6 +692,141 @@ def _part_cmd(lst: str, a: float, length: float, n_parts: int, vf: list[str], gp
         cmd += ["-ss", f"{a:.4f}", "-t", f"{length:.4f}"]
     return cmd + ["-f", "concat", "-safe", "0", "-i", lst, "-map", "0:v:0", "-an", "-sn", "-dn",
                   "-vf", ",".join(vf)]
+
+
+def _src_cmd(lst: str, a: float, length: float, n_parts: int, fps: float, size: tuple[int, int]) -> list[str]:
+    """Decode (part of) the export at a constant frame rate as raw RGB frames on stdout."""
+    cmd = [dc.tool("ffmpeg"), "-y", "-v", "error", "-nostdin"]
+    if n_parts > 1:
+        cmd += ["-ss", f"{a:.4f}", "-t", f"{length:.4f}"]
+    return cmd + ["-f", "concat", "-safe", "0", "-i", lst, "-map", "0:v:0", "-an", "-sn", "-dn",
+                  "-vf", f"setpts=PTS-STARTPTS,fps={fps:.6f},scale={size[0]}:{size[1]}:flags=area,format=rgb24",
+                  "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+
+
+def _sink_cmd(size: tuple[int, int], fps: float, vf: list[str], gpu: bool) -> list[str]:
+    """Take raw RGB frames on stdin and filter them (output options are added by the caller)."""
+    cmd = [dc.tool("ffmpeg"), "-y", "-v", "error", "-nostdin", *(VK_ARGS if gpu else []),
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{size[0]}x{size[1]}", "-framerate", f"{fps:.6f}",
+           "-i", "pipe:0"]
+    return cmd + (["-vf", ",".join(vf)] if vf else [])
+
+
+class _FrameCtx:
+    """Repair and clean-up shared by the parallel parts of one export."""
+
+    def __init__(self, es: EnhanceSettings, fps: float, hints: np.ndarray | None, model):
+        self.es, self.fps, self.hints, self.model = es, fps, hints, model
+        self.chains: dict[int, _Chain] = {}
+        self._sets: dict[int, tuple[int, set]] = {}
+
+    def chain(self, part: int, start: float) -> "_Chain":
+        j0 = int(round(start * self.fps))
+        hints = self.hints
+
+        def hint(i):
+            j = j0 + i
+            return True if hints is None or not 0 <= j < len(hints) else bool(hints[j])
+        ch = _Chain(self.es, hint, self.model)
+        self.chains[part] = ch
+        return ch
+
+    def runs(self, part: int) -> list:
+        ch = self.chains.get(part)
+        return list(ch.broken.runs) if ch is not None and ch.broken is not None else []
+
+    def replaced(self, part: int, idx: int) -> bool:
+        """Was frame idx (1-based, as saved) of a part replaced?"""
+        runs = self.runs(part)
+        n, st = self._sets.get(part, (0, set()))
+        for first, r, _a, _b in runs[n:]:
+            st.update(range(first + 1, first + r + 1))
+        self._sets[part] = (len(runs), st)
+        return idx in st
+
+    def stats(self) -> tuple[int, int, int]:
+        """(frames replaced, frames with lines repaired, frames through the model)"""
+        rep = sum(c.broken.replaced for c in self.chains.values() if c.broken is not None)
+        lines = sum(c.lines.fixed_frames for c in self.chains.values() if c.lines is not None)
+        return rep, lines, sum(c.model_frames for c in self.chains.values())
+
+
+class _Chain:
+    def __init__(self, es: EnhanceSettings, hint, model):
+        self.broken = repair.BrokenFrames(hint) if es.fix_broken else None
+        self.lines = repair.LineRepair() if es.fix_lines else None
+        self.model = model
+        self.model_frames = 0
+
+    def _finish(self, f: np.ndarray) -> np.ndarray:
+        if self.lines is not None:
+            f = self.lines(f)
+        if self.model is not None:
+            f = self.model.run(f)
+            self.model_frames += 1
+        return f
+
+    def push(self, f: np.ndarray) -> list[np.ndarray]:
+        return [self._finish(x) for x in (self.broken.push(f) if self.broken is not None else [f])]
+
+    def flush(self) -> list[np.ndarray]:
+        return [self._finish(x) for x in (self.broken.flush() if self.broken is not None else [])]
+
+
+def _pump(src_cmd: list[str], sink_cmd: list[str], size: tuple[int, int], chain: _Chain, cancel,
+          tick=None) -> int:
+    """ffmpeg (decode) -> repair / clean-up in Python -> ffmpeg (filter, save or encode)."""
+    w, h = size
+    fsz = w * h * 3
+    pa = subprocess.Popen(src_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                          bufsize=fsz * 2, **dc._popen_kwargs())
+    pb = subprocess.Popen(sink_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                          **dc._popen_kwargs())
+    errs: dict[str, list] = {"a": [], "b": []}
+    threads = [threading.Thread(target=lambda p=p, k=k: errs[k].append(p.stderr.read()), daemon=True)
+               for p, k in ((pa, "a"), (pb, "b"))]
+    for t in threads:
+        t.start()
+    n = 0
+    broken_pipe = False
+
+    def put(frames):
+        for f in frames:
+            pb.stdin.write(np.ascontiguousarray(f).data)
+
+    try:
+        while True:
+            if cancel is not None and cancel.is_set():
+                raise dc.Cancelled()
+            buf = pa.stdout.read(fsz)
+            if not buf or len(buf) < fsz:
+                break
+            put(chain.push(np.frombuffer(buf, np.uint8).reshape(h, w, 3)))
+            n += 1
+            if tick:
+                tick(n)
+        put(chain.flush())
+        pb.stdin.close()
+        pa.wait()
+        pb.wait()
+    except BrokenPipeError:
+        broken_pipe = True
+    finally:
+        for p in (pa, pb):
+            if p.poll() is None:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+                p.wait()
+        for t in threads:
+            t.join(timeout=5)
+    if cancel is not None and cancel.is_set():
+        raise dc.Cancelled()
+    if broken_pipe or pa.returncode != 0 or pb.returncode != 0:
+        msg = b"".join(errs["b"] + errs["a"]).decode("utf-8", "replace")[-2500:]
+        raise RuntimeError("Preparing frames failed:\n" + msg)
+    return n
 
 
 class _Progress:
@@ -625,9 +903,7 @@ def enhance(s: dc.Session, out_path: str, es: EnhanceSettings, progress=None,
     pieces = dc.build_pieces(s, keep)
     if not pieces:
         raise RuntimeError("Nothing to export in that range.")
-    if (es.ai_upscale or es.fps60) and not ai_installed():
-        raise RuntimeError("AI upscaling and smooth 60 fps need the AI add-on.\n"
-                           "Use Enhance > Download AI add-on, or switch them off.")
+    check_ready(es)
     cancel = cancel or threading.Event()
     src_fps = float(np.median([c.fps for c in s.clips]))
     out_fps = 60.0 if es.fps60 else src_fps
@@ -637,38 +913,75 @@ def enhance(s: dc.Session, out_path: str, es: EnhanceSettings, progress=None,
     t_start = time.time()
     tmp = dc._tmpdir_for(out_path)
     keys = _keys(s, es, enc)
+    ctx = None
+    info = {}
     try:
         lst = os.path.join(tmp, "concat.txt")
         duration = dc.write_concat_list(pieces, lst, tmp, cancel)
         est = estimate(s, es, enc, seconds=duration)
+        if needs_frames(es):
+            if progress and es.cleanup:
+                progress(0.0, "Loading the clean-up model...")
+            model = mdl.load(es.cleanup) if es.cleanup else None
+            if model is not None:
+                info["cleanup_device"] = model.device
+                busy0, frames0 = model.busy, model.frames
+            hints = dc.repair_hints(s, keep, src_fps, int(duration * src_fps) + 2) if es.fix_broken else None
+            ctx = _FrameCtx(es, src_fps, hints, model)
         if not (es.ai_upscale or es.fps60):
-            n = _quick(s, es, enc, lst, duration, src_fps, gpu_dn, out_path, tmp, progress, cancel)
+            n = _quick(s, es, enc, lst, duration, src_fps, gpu_dn, out_path, tmp, progress, cancel, ctx)
             if n == quick_parts(es, enc):         # short previews run as one part: not comparable
                 record_speed(keys["quick"], (time.time() - t_start) / max(1.0, duration))
         else:
             _check_space(tmp, s, es, duration, src_fps)
             _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, tmp, est,
-                         keys, progress, cancel)
+                         keys, progress, cancel, ctx)
+        if ctx is not None and ctx.model is not None and ctx.model.frames > frames0:
+            record_speed(keys["clean"], (ctx.model.busy - busy0) / (ctx.model.frames - frames0))
+        if t_range is None:
+            _add_chapters(s, out_path, tmp, cancel)
+            dc.save_chapters_txt(s, out_path)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if progress:
         progress(1.0, "Done.")
+    if ctx is not None:
+        info["replaced"], info["lines"], _ = ctx.stats()
     return {"path": out_path, "encoder": ENCODER_NAMES.get(enc, enc), "size": (ow, oh),
             "fps": out_fps, "seconds": time.time() - t_start, "duration": duration,
-            "gpu_denoise": gpu_dn}
+            "gpu_denoise": gpu_dn, **info}
+
+
+def _add_chapters(s: dc.Session, out_path: str, tmp: str, cancel) -> None:
+    """Put the chapter markers into the finished MP4 (a quick copy, no re-encoding)."""
+    meta = os.path.join(tmp, "chapters.txt")
+    if dc.write_chapters(s, meta) == 0:
+        return
+    tmp_out = os.path.join(tmp, "with_chapters.mp4")
+    try:
+        _run([dc.tool("ffmpeg"), "-y", "-v", "error", "-nostdin", "-i", out_path, "-i", meta, "-map", "0",
+              "-map_metadata", "1", "-map_chapters", "1", "-c", "copy", "-movflags", "+faststart", tmp_out],
+             cancel, "Adding chapters")
+        os.replace(tmp_out, out_path)
+    except RuntimeError:
+        pass                    # chapters are a nice-to-have: keep the video without them
 
 
 def quick_parts(es: EnhanceSettings, enc: str) -> int:
     return min(workers(es), 3) if is_hw_encoder(enc) else workers(es)
 
 
-def _quick(s, es, enc, lst, duration, src_fps, gpu_dn, out_path, tmp, progress, cancel) -> int:
+def _quick(s, es, enc, lst, duration, src_fps, gpu_dn, out_path, tmp, progress, cancel, ctx=None) -> int:
     """No AI: clean, resize and encode in one pass, split into parallel parts."""
     vf = pre_filters(s, es, src_fps, gpu_dn) + post_filters(s, es)
     n = quick_parts(es, enc)                 # consumer graphics cards limit parallel encodes
     parts = _parts(duration, n if duration > 20 else 1)
     fracs = [0.0] * len(parts)
     t0 = time.time()
+    size = stage_size(s, es)
+    ww, wh = work_size(s, es)
+    vf_b = ([f"scale={ww}:{wh}:flags=area"] if size != (ww, wh) else []) + clean_filters(es, gpu_dn) \
+        + post_filters(s, es)
 
     def report():
         if progress:
@@ -681,8 +994,18 @@ def _quick(s, es, enc, lst, duration, src_fps, gpu_dn, out_path, tmp, progress, 
     def one(k):
         a, length = parts[k]
         out = out_path if len(parts) == 1 else os.path.join(tmp, f"q{k:02d}.mp4")
-        cmd = _part_cmd(lst, a, length, len(parts), vf, gpu_dn) + [*encoder_args(enc, es.quality),
-                                                                    "-movflags", "+faststart", out]
+        tail = [*encoder_args(enc, es.quality), "-movflags", "+faststart", out]
+        if ctx is not None:
+            expect = max(1.0, length * src_fps)
+
+            def tick(i):
+                fracs[k] = min(1.0, i / expect)
+                if i % 10 == 0:
+                    report()
+            _pump(_src_cmd(lst, a, length, len(parts), src_fps, size),
+                  _sink_cmd(size, src_fps, vf_b, gpu_dn) + tail, size, ctx.chain(k, a), cancel, tick)
+            return out
+        cmd = _part_cmd(lst, a, length, len(parts), vf, gpu_dn) + tail
 
         def cb(f, _m):
             fracs[k] = f
@@ -728,7 +1051,7 @@ def _join(segs: list[str], out_path: str, tmp: str, cancel) -> None:
 
 
 def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, tmp, est, keys,
-                 progress, cancel) -> None:
+                 progress, cancel, ctx=None) -> None:
     """Prepare frames (parallel parts) -> AI upscale / 60 fps in batches -> encode, overlapping."""
     ratio = out_fps / src_fps
     pr = _Progress(progress, cancel, est, es, ratio)
@@ -739,15 +1062,25 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
     finished = [0.0] * len(parts)
     errors: list[BaseException] = []
     vf = pre_filters(s, es, src_fps, gpu_dn)
+    size = stage_size(s, es)
+    ww, wh = work_size(s, es)
+    vf_b = ([f"scale={ww}:{wh}:flags=area"] if size != (ww, wh) else []) + clean_filters(es, gpu_dn)
     t_prep = time.time()
+    rife_exe = find_ai("rife") if (ctx is not None and es.fix_broken) else None
 
     def prep_part(k):
         a, length = parts[k]
         os.makedirs(dirs[k], exist_ok=True)
-        cmd = _part_cmd(lst, a, length, len(parts), vf, gpu_dn) + [
-            "-q:v", "2", "-start_number", "1", os.path.join(dirs[k], "%08d.jpg")]
+        out = ["-q:v", "2", *dc.passthrough_args(), "-start_number", "1", os.path.join(dirs[k], "%08d.jpg")]
         try:
-            dc._run_ffmpeg_progress(cmd, length, lambda f, m: pr.prep_frac.__setitem__(k, f), cancel, "")
+            if ctx is not None:
+                expect = max(1.0, length * src_fps)
+                _pump(_src_cmd(lst, a, length, len(parts), src_fps, size),
+                      _sink_cmd(size, src_fps, vf_b, gpu_dn) + out, size, ctx.chain(k, a), cancel,
+                      lambda i: pr.prep_frac.__setitem__(k, min(1.0, i / expect)))
+            else:
+                cmd = _part_cmd(lst, a, length, len(parts), vf, gpu_dn) + out[:2] + out[-3:]
+                dc._run_ffmpeg_progress(cmd, length, lambda f, m: pr.prep_frac.__setitem__(k, f), cancel, "")
             pr.prep_frac[k] = 1.0
         except BaseException as e:      # noqa: BLE001 - reported to the main loop
             errors.append(e)
@@ -809,16 +1142,27 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
         check()
         cur_part, cur_idx, consumed, k = 0, 1, 0, 0
 
+        def in_run():
+            """Is the batch's last frame replaced, or the good frame just before a replaced one?
+            (batches never split a run from the good frames either side, so RIFE can redraw it)"""
+            if ctx is None or not got_last:
+                return False
+            part, idx = got_last[-1]
+            return ctx.replaced(part, idx) or ctx.replaced(part, idx + 1)
+
+        got_last: list = []
+
         def take(n):
             nonlocal cur_part, cur_idx
             got = []
             last_say = 0.0
-            while len(got) < n and cur_part < len(parts):
+            while (len(got) < n or in_run()) and cur_part < len(parts):
                 check()
                 f = os.path.join(dirs[cur_part], f"{cur_idx:08d}.jpg")
                 nxt = os.path.join(dirs[cur_part], f"{cur_idx + 1:08d}.jpg")
                 if os.path.exists(f) and (done[cur_part] or os.path.exists(nxt)):
-                    got.append(f)
+                    got.append((f, cur_part, cur_idx))
+                    got_last[:] = [(cur_part, cur_idx)]
                     cur_idx += 1
                 elif done[cur_part] and not os.path.exists(f):
                     cur_part, cur_idx = cur_part + 1, 1
@@ -839,9 +1183,22 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
             cdir = os.path.join(tmp, f"chunk{k:04d}")
             cur = os.path.join(cdir, "in")
             os.makedirs(cur)
-            for i, f in enumerate(batch, 1):
+            pos = {}
+            for i, (f, part, idx) in enumerate(batch, 1):
                 os.replace(f, os.path.join(cur, f"{i:08d}.jpg"))
+                pos[(part, idx)] = os.path.join(cur, f"{i:08d}.jpg")
             tb = time.time()
+            if rife_exe:
+                fills = []
+                for part in sorted({p for _, p, _ in batch}):
+                    for first, r, ga, gb in ctx.runs(part):
+                        want = [(part, first + 1 + j) for j in range(r)] + [(part, ga + 1), (part, gb + 1)]
+                        if all(w in pos for w in want):
+                            fills.append(([pos[w] for w in want[:r]], pos[want[r]], pos[want[r + 1]]))
+                if fills:
+                    pr.say("redrawing broken frames", k)
+                    repair.rife_fill(cdir, fills, rife_exe, os.path.join(os.path.dirname(rife_exe), RIFE_MODEL),
+                                     _run, cancel)
             if es.ai_upscale:
                 pr.say("AI upscaling", k)
                 t = time.time()
@@ -929,8 +1286,7 @@ def _check_space(tmp: str, s: dc.Session, es: EnhanceSettings, duration: float, 
 
 def compare_frame(s: dc.Session, t: float, es: EnhanceSettings, cancel=None) -> bytes:
     """A before/after picture of one moment: full frames on top, a 100% crop below (PNG)."""
-    if es.ai_upscale and not ai_installed():
-        raise RuntimeError("AI upscaling needs the AI add-on (Enhance > Download AI add-on).")
+    check_ready(dataclasses.replace(es, fps60=False))
     os.makedirs(APP_DATA, exist_ok=True)
     work = os.path.join(APP_DATA, "compare")
     shutil.rmtree(work, ignore_errors=True)
@@ -947,10 +1303,20 @@ def compare_frame(s: dc.Session, t: float, es: EnhanceSettings, cancel=None) -> 
         dc.write_concat_list(pieces, lst, work, cancel)
         pre = os.path.join(work, "pre")
         os.makedirs(pre)
-        _run([dc.tool("ffmpeg"), "-y", "-v", "error", "-nostdin", *(VK_ARGS if gpu_dn else []),
-              "-f", "concat", "-safe", "0", "-i", lst,
-              "-map", "0:v:0", "-an", "-vf", ",".join(pre_filters(s, es, src_fps, gpu_dn)), "-q:v", "2",
-              "-start_number", "1", os.path.join(pre, "%08d.jpg")], cancel, "Preparing frame")
+        if needs_frames(es):
+            size = stage_size(s, es)
+            ww, wh = work_size(s, es)
+            vf_b = ([f"scale={ww}:{wh}:flags=area"] if size != (ww, wh) else []) + clean_filters(es, gpu_dn)
+            ctx = _FrameCtx(es, src_fps, None, mdl.load(es.cleanup) if es.cleanup else None)
+            _pump(_src_cmd(lst, 0, 0, 1, src_fps, size),
+                  _sink_cmd(size, src_fps, vf_b, gpu_dn) + ["-q:v", "2", *dc.passthrough_args(), "-start_number",
+                                                            "1", os.path.join(pre, "%08d.jpg")],
+                  size, ctx.chain(0, 0.0), cancel)
+        else:
+            _run([dc.tool("ffmpeg"), "-y", "-v", "error", "-nostdin", *(VK_ARGS if gpu_dn else []),
+                  "-f", "concat", "-safe", "0", "-i", lst,
+                  "-map", "0:v:0", "-an", "-vf", ",".join(pre_filters(s, es, src_fps, gpu_dn)), "-q:v", "2",
+                  "-start_number", "1", os.path.join(pre, "%08d.jpg")], cancel, "Preparing frame")
         names = sorted(os.listdir(pre))
         if not names:
             raise RuntimeError("No picture at that moment.")

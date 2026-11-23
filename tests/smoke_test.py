@@ -11,7 +11,10 @@ post-flight STATS screen before two of the three power-offs. Then it checks that
     identical to the originals (no re-encoding),
   * MKV export gets one chapter per flight and the report is written,
   * the diagnostics zip is complete and its sample frames are exact copies,
-  * "Enhance for YouTube" produces a video of the right size and length
+  * editing (moving a cut, splitting, Keep/Cut, undo) and chapters (flights, your own,
+    renamed, YouTube description text) work, and chapters reach MKV and MP4 exports,
+  * "Enhance for YouTube" produces a video of the right size and length, replaces the
+    broken frame planted in the fake footage, runs ONNX models (tiny stand-in models)
     (and, off Windows, that the AI path works with stand-in AI tools).
 
 Needs ffmpeg + ffprobe (next to dvr_core.py, in ./ffmpeg, or on the PATH).
@@ -42,6 +45,7 @@ FPS = "109/4"   # 27.25 fps, like the real receiver
 PLAN = [("snow", 6), ("good", 10), ("snow", 1.5), ("good", 5), ("stats", 3), ("snow", 9),
         ("good", 8), ("snow", 6), ("good", 6), ("stats", 3), ("snow", 4)]
 EXPECT_ACTIONS = ["cut", "keep", "cut", "keep", "cut", "cut", "keep", "cut", "keep", "cut", "cut"]
+GLITCH_PART, GLITCH_FRAME = 6, 100   # one broken frame (blown-out streaks) planted in the third flight
 FAILURES: list[str] = []
 
 
@@ -87,6 +91,12 @@ def make_session(d: str) -> list[str]:
         if kind == "snow":   # harsh black/white grain, new every frame, no colour - like real static
             src = ["-f", "lavfi", "-i", f"color=c=0x808080:s=320x240:r={FPS},noise=c0s=100:c0f=t+u,"
                    "lutyuv=y='if(gt(val,128),235,16)':u=128:v=128,scale=640:480:flags=neighbor"]
+        elif i == GLITCH_PART:   # flight with one broken frame: white with black streaks, no colour
+            src = ["-f", "lavfi", "-i", f"testsrc2=s=640x480:r={FPS}",
+                   "-i", os.path.join(d, "osd.png"),
+                   "-f", "lavfi", "-i", f"color=c=white:s=640x480:r={FPS},noise=c0s=90:c0f=u+t,"
+                   "lutyuv=y='if(lt(val,120),16,235)':u=128:v=128",
+                   "-filter_complex", f"[0:v][1:v]overlay[a];[a][2:v]overlay=enable='eq(n,{GLITCH_FRAME})'"]
         else:                # moving, coloured picture with the flight OSD or the STATS screen on top
             src = ["-f", "lavfi", "-i", f"testsrc2=s=640x480:r={FPS}",
                    "-i", os.path.join(d, "stats.png" if kind == "stats" else "osd.png"),
@@ -121,6 +131,40 @@ def probe(path: str) -> dict:
     st = j["streams"][0]
     a, b = st["avg_frame_rate"].split("/")
     return {"w": st["width"], "h": st["height"], "fps": float(a) / float(b), "dur": float(j["format"]["duration"])}
+
+
+def tiny_models(d: str) -> str | None:
+    """Stand-in ONNX models with the catalog's names: a 1x 'clean-up' (identity) and a 2x upscaler."""
+    try:
+        import onnx
+        from onnx import TensorProto, helper
+    except ImportError:
+        return None
+    root = os.path.join(d, "models")
+    os.makedirs(root, exist_ok=True)
+    inp = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, None, None])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 3, None, None])
+    w = np.zeros((3, 3, 3, 3), np.float32)
+    for c in range(3):
+        w[c, c, 1, 1] = 1.0
+    ident = helper.make_graph([helper.make_node("Conv", ["input", "w"], ["output"], pads=[1, 1, 1, 1])],
+                              "clean", [inp], [out], [helper.make_tensor("w", TensorProto.FLOAT, w.shape, w.ravel())])
+    up2 = helper.make_graph([helper.make_node("Resize", ["input", "", "scales"], ["output"], mode="nearest")],
+                            "up2", [inp], [out],
+                            [helper.make_tensor("scales", TensorProto.FLOAT, [4], [1, 1, 2, 2])])
+    for g, mid in ((ident, "bleedout"), (up2, "vhs2hd")):
+        m = helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)])
+        m.ir_version = 8
+        onnx.save(m, os.path.join(root, f"model-{mid}.onnx"))
+    return root
+
+
+def frame_jumps(path: str) -> np.ndarray:
+    """Mean change from each frame to the next of a video (small grey frames)."""
+    raw = subprocess.run([dc.tool("ffmpeg"), "-v", "error", "-nostdin", "-i", path, "-vf", "scale=64:48,format=gray",
+                          "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    f = np.frombuffer(raw, np.uint8).reshape(-1, 48, 64).astype(np.float32)
+    return np.abs(np.diff(f, axis=0)).mean(axis=(1, 2))
 
 
 def fake_ai_tools(d: str) -> str:
@@ -219,6 +263,57 @@ def main() -> int:
         chap = subprocess.run([dc.tool("ffprobe"), "-v", "error", "-show_chapters", "-of", "csv=p=0",
                                os.path.join(d, "stitched.mkv")], capture_output=True, text=True).stdout
         check(len([c for c in chap.splitlines() if c.strip()]) == 3, "MKV has 3 flight chapters")
+        txt = os.path.join(d, "stitched_chapters.txt")
+        check(os.path.isfile(txt) and open(txt, encoding="utf-8").read().startswith("00:00 Flight 1"),
+              "chapter list for YouTube saved next to the video")
+
+        # ---- editing by hand -------------------------------------------------
+        print("Editing cuts and chapters...")
+        before = [(g.kind, g.f0, g.f1, g.action) for g in s.segments]
+        snap = dc.snapshot(s)
+        t_orig = s.segments[1].t0
+        t_new = dc.move_edge(s, 1, "start", t_orig + 1.0)
+        check(t_new is not None and abs(t_new - (t_orig + 1.0)) < 0.04 and s.segments[0].f1 == s.segments[1].f0
+              and abs(s.segments[0].t1 - s.segments[1].t0) < 1e-6, f"move a cut: flight 1 now starts at {t_new:.3f}s")
+        lim = dc.edge_limits(s, 1, "start")
+        dc.move_edge(s, 1, "start", -5.0)
+        check(abs(s.segments[1].t0 - lim[0]) < 0.04 and s.segments[0].duration >= dc.MIN_PART_S - 0.04,
+              "a cut can't be dragged past the part before it")
+        dc.move_edge(s, 1, "start", t_orig)
+        n0 = len(s.segments)
+        mid = (s.segments[1].t0 + s.segments[1].t1) / 2
+        check(dc.split_segment(s, 1, mid) and len(s.segments) == n0 + 1
+              and "(continued)" in s.segments[2].label, "split a flight in two")
+        dc.toggle_segment(s, 2)
+        keep2 = s.keep_mask()
+        check(not keep2[s.segments[2].f0:s.segments[2].f1].any() and keep2[s.segments[1].f0:s.segments[1].f1].all(),
+              "cut the second half of the split flight")
+        c_cut = dc.add_chapter(s, (s.segments[2].t0 + s.segments[2].t1) / 2, "In a cut part")
+        dc.add_chapter(s, s.segments[-4].t0 + 2.0, "Mine")
+        s.flight_names[2] = "Second pack"
+        cl = dc.chapter_list(s)
+        names = [c["name"] for c in cl]
+        check(cl[0]["out"] == 0.0 and names[0] == "Flight 1" and "Second pack" in names and "Mine" in names,
+              f"chapter list {names}")
+        moved = [c for c in cl if c["id"] == c_cut.id]
+        check(bool(moved) and moved[0]["moved"], "a chapter in a cut part moves to the next kept moment")
+        yt = dc.youtube_text(cl).splitlines()
+        check(yt[0].startswith("00:00 ") and len(yt) == len(cl), f"YouTube text: {yt}")
+        check(any(not ok for ok, _ in dc.youtube_checks(cl)), "YouTube checks flag short/moved chapters")
+        out = os.path.join(d, "edited.mkv")
+        dc.export_video(s, out)
+        chap = subprocess.run([dc.tool("ffprobe"), "-v", "error", "-show_chapters", "-show_entries",
+                               "chapter_tags=title", "-of", "csv=p=0", out], capture_output=True, text=True).stdout
+        check("Second pack" in chap and "Mine" in chap, "renamed and added chapters are in the MKV")
+        check(abs(probe(out)["dur"] - s.kept_duration()) < 0.1, "edited export has the edited length")
+        dc.restore(s, snap)
+        check([(g.kind, g.f0, g.f1, g.action) for g in s.segments] == before and not s.chapters, "undo restores everything")
+        dc.toggle_segment(s, 3)
+        dc.reset_edits(s)
+        check([(g.kind, g.f0, g.f1, g.action) for g in s.segments] == before and not s.edited,
+              "reset goes back to the detected cuts")
+        t_o = s.session_to_out(s.segments[6].t0 + 1.0)
+        check(abs(s.out_to_session(t_o) - (s.segments[6].t0 + 1.0)) < 0.04, "session <-> export time mapping")
 
         print("Writing report...")
         rep = dc.write_report(s, os.path.join(d, "stitched.avi"))
@@ -260,8 +355,47 @@ def main() -> int:
         check(p["w"] == 1440 and p["h"] == 1080 and abs(p["dur"] - s.kept_duration()) < 0.2,
               f"enhanced video {p['w']}x{p['h']}, {p['dur']:.2f}s (kept {s.kept_duration():.2f}s) via {r['encoder']}, "
               f"{en.quick_parts(es, en.pick_encoder())} parts")
+        chap = subprocess.run([dc.tool("ffprobe"), "-v", "error", "-show_chapters", "-of", "csv=p=0", r["path"]],
+                              capture_output=True, text=True).stdout
+        check(len([c for c in chap.splitlines() if c.strip()]) == 3, "enhanced MP4 has the 3 flight chapters")
         png = en.compare_frame(s, s.segments[1].t0 + 2, es)
         check(png[:8] == b"\x89PNG\r\n\x1a\n", "before/after comparison picture made")
+
+        # ---- repair: the planted broken frame ------------------------------
+        g0 = s.segments[GLITCH_PART]
+        t_glitch = g0.t0 + GLITCH_FRAME / 27.25
+        es_r = en.EnhanceSettings()
+        en.apply_preset(es_r, "quick")
+        es_r.height = 480
+        for fix in (False, True):
+            es_r.fix_broken = es_r.fix_lines = fix
+            r = en.enhance(s, os.path.join(d, f"repair{int(fix)}.mp4"), es_r, t_range=(t_glitch - 2, t_glitch + 2))
+            jumps = frame_jumps(r["path"])
+            ratio = float(jumps.max() / (np.median(jumps) + 1e-6))
+            if fix:
+                check(r.get("replaced", 0) >= 1 and ratio < 4,
+                      f"broken frame replaced ({r.get('replaced', 0)} frame(s); biggest jump {ratio:.1f}x normal)")
+            else:
+                check(ratio > 6, f"(without repair the broken frame stands out: {ratio:.1f}x normal)")
+
+        mdir = tiny_models(d)
+        if mdir:
+            os.environ["FPV_MODEL_DIR"] = mdir
+            import models as mdl
+            check(mdl.installed("bleedout") and mdl.installed("vhs2hd"), "stand-in ONNX models found")
+            es_m = en.EnhanceSettings()
+            en.apply_preset(es_m, "quick")
+            es_m.cleanup, es_m.height = "bleedout", 480
+            r = en.enhance(s, os.path.join(d, "clean.mp4"), es_m, t_range=(t_glitch - 2, t_glitch + 2))
+            p = probe(r["path"])
+            check(p["h"] == 480 and abs(p["dur"] - r["duration"]) < 0.15 and r.get("cleanup_device"),
+                  f"clean-up model ({r.get('cleanup_device')}): {p['w']}x{p['h']}, {p['dur']:.2f}s")
+            png = en.compare_frame(s, t_glitch - 1, es_m)
+            check(png[:8] == b"\x89PNG\r\n\x1a\n", "comparison picture with the clean-up model")
+            e = en.estimate(s, es_m)
+            check(e["clean"] > 0, f"estimate includes the clean-up model ({en.fmt_minutes(e['clean'])})")
+        else:
+            print("  skip  ONNX model tests (pip install onnx to run them)")
         back = en.settings_from_dict(en.settings_dict(es))
         check(back == es, "enhance settings survive saving and loading")
 
@@ -291,6 +425,16 @@ def main() -> int:
                 want = r["duration"]
                 check(p["w"] == 1920 and p["h"] == 1440 and abs(p["fps"] - 60) < 0.01 and abs(p["dur"] - want) < 0.15,
                       f"AI path ({name}): {p['w']}x{p['h']} at {p['fps']:.0f} fps, {p['dur']:.2f}s of {want:.2f}s")
+            if mdir:
+                es = en.EnhanceSettings()
+                en.apply_preset(es, "balanced")
+                es.ai_model, es.cleanup, es.height = "vhs2hd", "bleedout", 960
+                r = en.enhance(s, os.path.join(d, "youtube_onnx.mp4"), es, t_range=(t_glitch - 8, t_glitch + 8))
+                p = probe(r["path"])
+                check(p["w"] == 1280 and p["h"] == 960 and abs(p["dur"] - r["duration"]) < 0.15
+                      and r.get("replaced", 0) >= 1,
+                      f"AI path with an ONNX upscaler + clean-up + RIFE-redrawn broken frame: {p['w']}x{p['h']}, "
+                      f"{p['dur']:.2f}s, {r.get('replaced', 0)} replaced")
             en.CHUNK_FRAMES = old_chunk
             del os.environ["FPV_AI_DIR"]
 

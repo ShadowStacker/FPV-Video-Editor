@@ -13,9 +13,14 @@ the same frames as in your original files, so quality is identical. Audio is
 removed. A 30-minute session takes roughly a minute to analyse and a few
 seconds to export.
 
-"Enhance for YouTube" is a separate export that cleans up the picture
-(colour speckles, grain), upscales it (optionally with AI on the graphics
-card), can smooth it to 60 fps, and saves a 1440p MP4 ready to upload.
+You can fine-tune every cut on the timeline (drag it, or type a time), play
+the result in the preview, and add your own chapters, which go into MKV/MP4
+exports and into a ready-to-paste chapter list for YouTube.
+
+"Enhance for YouTube" is a separate export that repairs broken frames and
+streaks from breakup, cleans up the picture (rainbow colour noise, grain,
+optionally with a clean-up AI model), upscales it (optionally with AI on the
+graphics card), can smooth it to 60 fps, and saves a 1440p MP4 ready to upload.
 
 
 GETTING IT (Windows 10/11)
@@ -54,9 +59,52 @@ USING IT
                       or a crash - worth a look.
    Click anywhere on the timeline or on a row to see a preview frame. For a
    loss of signal the preview shows the last clear frame before it.
-   Double-click a row (or press Space) to switch it between KEEP and CUT.
-4. Press "2. Export video..." for the original-quality video, and/or
+   Double-click a row (or select it and press X) to switch it between KEEP
+   and CUT.
+4. Fine-tune the cuts if you like (see EDITING below).
+5. Press "2. Export video..." for the original-quality video, and/or
    "3. Enhance for YouTube..." for an upload-ready 1440p MP4.
+
+
+EDITING AND PLAYING
+-------------------
+Preview player   Space (or the play button) plays the preview. |< and >| step
+                 one frame. Speed: 1/2x to 8x. "As exported" plays only the kept
+                 parts, joined like the export; "Original" plays the recording.
+                 The larger-window button (or double-click the picture) opens a
+                 bigger preview. The list and the timeline follow the playback.
+Moving a cut     Select a row: a black box marks it on the timeline. Drag the
+                 box's left or right edge; the preview shows the frame at the
+                 cut, and the neighbouring part follows. After dragging, the
+                 arrow keys move that cut by one frame (Shift: 1 second); Esc
+                 stops. Or double-click a Start or End time in the list and type
+                 a new one (like 14:35.200), then press Enter.
+Zoom             Mouse wheel over the timeline zooms in around the mouse;
+                 Shift+wheel moves sideways. Right-click > "Show the whole
+                 recording" zooms back out.
+Edit menu        Also on right-click (timeline or list). Uses the playhead (the
+(right-click)    thin black line = the frame in the preview):
+                   Set start here (I) / Set end here (O)   move the selected
+                                                           part's start / end
+                   Split here (S)          split the part in two
+                   Cut / Keep this part (X)
+                   Play around this cut (P) plays 3 s either side of the cut,
+                                            as it will look in the export
+                   Add chapter here (C), Chapters...
+                   Zoom to this part, Show the whole recording
+                   Undo (Ctrl+Z), Reset to detected cuts
+Chapters         Every flight gets a chapter automatically (green flags above
+                 the timeline); your own are purple. Edit > Chapters... lists
+                 them with their time in the exported video: rename them, delete
+                 your own, and "Copy for YouTube" copies the list in the format
+                 YouTube reads from a video's DESCRIPTION (YouTube ignores
+                 chapter markers inside the file). YouTube needs the first at
+                 00:00, at least 3 chapters and each at least 10 s long; the
+                 window says if any of that is not met. The same chapters go
+                 into MKV and YouTube MP4 exports, and every export saves them
+                 next to the video as ..._chapters.txt.
+Changing a setting on the left re-runs the detection: your own cut changes
+are reset, and Edit > Undo brings them back.
 
 
 SETTINGS
@@ -79,8 +127,8 @@ Trim post-flight STATS   Cuts the Betaflight statistics screen shown between
                          recording itself. Each one gets its own row in the
                          list, so you can keep any of them with a double-click.
 Output AVI / MKV         AVI = same format as your originals.
-                         MKV = same video, plus a chapter marker per flight
-                         (VLC: Playback -> Chapter).
+                         MKV = same video, plus the chapter markers (one per
+                         flight + your own; VLC: Playback -> Chapter).
 Signal-loss report       Saves a folder next to the video with report.html:
   (default off)          every loss of signal with its time in the original
                          files and in the exported video, the last clear frame,
@@ -94,12 +142,33 @@ Open it with "3. Enhance for YouTube..." (or the Enhance menu) after Analyse.
 Hover the mouse over any option (or click its ?) for what it does, how it
 affects quality and speed, and the recommended setting.
 Presets:
-  Quick            No AI. Cleans colour speckles and grain, sharpens and
-                   upscales to 1440p. About as fast as real time.
-  Balanced         Same clean-up, then the Fast AI model on the graphics card.
-  (default)        The recommended choice for YouTube.
-  Best quality     The Detailed AI model: sharpest, several times slower.
+  Quick            No AI. Repairs, cleans colour speckles and grain, sharpens
+                   and upscales to 1440p. About as fast as real time.
+  Balanced         Repair, the BleedOut clean-up model, then the Fast AI model
+  (default)        on the graphics card. The recommended choice for YouTube.
+  Best quality     The same with the Detailed AI model: sharpest, slower.
+Repair and clean-up:
+  Replace broken frames  Frames that came out torn, rolled or blown out when the
+                   signal broke up (while the frames either side are fine) are
+                   replaced: redrawn as in-between frames with RIFE (AI add-on,
+                   in AI or 60 fps exports) or by the nearest good frame. Only
+                   spots where the analysis saw weak signal are checked, and
+                   breakups longer than 6 frames stay in.
+  Repair lines     Fills in short-lived streak lines and bands of rainbow colour
+                   noise across the picture. The OSD is left alone.
+  Clean-up model   An AI model that cleans the picture first, at its own size:
+                     Rainbows & colour bleed (BleedOut) - recommended
+                     Dot crawl & rainbows (Dotzilla)
+                     Heavy clean-up (Archivist AntiLines) - smooths detail
+                     Heavy colour noise (Archivist RGB) - smooths detail
+                   There are no models made for FPV footage; these are free
+                   community models made for analog / VHS video, which has the
+                   same faults. Each is downloaded (1-4 MB) the first time it is
+                   used, and runs on the graphics card (DirectX 12).
 Picture options:
+  AI model         Built-in (AI add-on): Fast, Detailed. Downloaded when used:
+                   General x4 - smooth, General x4 - keeps texture (Real-ESRGAN),
+                   VHS to HD x2 (best on 720p HD-mode recordings; slow).
   AI resolution    Full size (best), or 1080p then scaled up (~45% less AI work).
   Smooth 60 fps    AI frame interpolation (RIFE). Also in the Enhance menu.
   60 fps detail    Standard, or High-detail (better on very fast motion, slower).
@@ -116,8 +185,10 @@ Before a long export:
                        window's preview (whole frame + 100% detail).
   Render 10 s preview  renders 10 seconds from that moment and plays it.
 The AI tools (Real-ESRGAN and RIFE) work on any modern NVIDIA, AMD or Intel
-graphics card. Enhanced footage is for sharing - AI can invent detail, so use
-the normal export when looking for a crashed quad.
+graphics card, and so do the downloaded models (ONNX Runtime with DirectML).
+Enhanced footage is for sharing - AI can invent detail, so use the normal
+export when looking for a crashed quad. The finished MP4 has the chapter
+markers, and the chapter list is saved next to it as ..._chapters.txt.
 
 
 HOW IT TELLS STATIC FROM WEAK SIGNAL
@@ -142,6 +213,14 @@ Static not cut / weak signal cut -> adjust "Static = snow covers at least",
                                 or flip individual rows with a double-click.
 AI upscaling / 60 fps fails  -> update your graphics card driver (the AI tools
                                 need Vulkan support), or use the Quick preset.
+Clean-up model is very slow  -> it is running on the processor: the Enhance
+                                window says where models run. Update the
+                                graphics card driver (DirectX 12 is needed).
+Model download fails         -> check the internet connection; the models come
+                                from this program's GitHub releases page.
+YouTube shows no chapters    -> paste the chapter list (Edit > Chapters... >
+                                Copy for YouTube, or ..._chapters.txt) into the
+                                video's description.
 Detection looks wrong on your footage -> after Analyse, use Help > Save
     diagnostics... and send the zip it makes (usually 10-25 MB). It holds the
     detector's measurements for every frame plus a selection of original

@@ -7,6 +7,8 @@ name: Build Windows app
 #                                 (downloads the AI add-on the first time AI is used)
 #   FPV-DVR-Stitcher-windows.zip  same program + FFmpeg + AI add-on as separate files
 #   FPV-DVR-Stitcher-AI-addon.zip Real-ESRGAN upscaler + RIFE frame interpolation
+#   model-<name>.onnx             clean-up and extra upscaling models (converted from the
+#                                 originals by the "models" job; downloaded by the app when used)
 on:
   push:
     branches: [main]
@@ -19,9 +21,52 @@ permissions:
   contents: write   # needed to attach the downloads to a Release
 
 jobs:
+  models:
+    # Convert the clean-up / upscaling models (models.CATALOG) from PyTorch to ONNX.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Cache converted models
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: models_out
+          key: models-${{ hashFiles('models.py', 'tools/convert_models.py') }}
+
+      - uses: actions/setup-python@v6
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Convert models
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install spandrel onnx onnxconverter-common onnxruntime numpy
+          python tools/convert_models.py models_out
+          rm -rf models_out/_src
+
+      - name: List models
+        run: ls -la models_out
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: FPV-DVR-Stitcher-models
+          path: models_out/
+
+      - name: Attach models to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" models_out/* --clobber --repo "${{ github.repository }}"
+
   build:
+    needs: models
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -33,7 +78,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r requirements.txt pyinstaller onnx
 
       - name: Download FFmpeg
         run: |
@@ -93,16 +138,25 @@ jobs:
           Compress-Archive -Path 'ai' -DestinationPath 'FPV-DVR-Stitcher-AI-addon.zip' -Force
           Get-Item 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
 
-      - name: Self-test (detection, lossless export, diagnostics, enhance)
+      - name: Self-test (detection, editing, chapters, lossless export, diagnostics, repair, enhance)
         run: python tests/smoke_test.py test_clips
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: FPV-DVR-Stitcher-models
+          path: models_test
+
       - name: Build .exe (zip version, FFmpeg alongside)
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV DVR Stitcher" fpv_dvr_stitcher.py
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV DVR Stitcher"
+          --collect-binaries onnxruntime --hidden-import PIL._tkinter_finder
+          fpv_dvr_stitcher.py
 
       - name: Build .exe (single-file version, FFmpeg built in)
         run: >-
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name "FPV-DVR-Stitcher"
           --workpath build_standalone
+          --collect-binaries onnxruntime --hidden-import PIL._tkinter_finder
           --add-binary "ffmpeg\ffmpeg.exe;ffmpeg" --add-binary "ffmpeg\ffprobe.exe;ffmpeg"
           fpv_dvr_stitcher.py
 
@@ -119,7 +173,9 @@ jobs:
           Copy-Item 'dist\FPV-DVR-Stitcher.exe' standalone
           Get-ChildItem 'standalone\FPV-DVR-Stitcher.exe', 'FPV-DVR-Stitcher-windows.zip', 'FPV-DVR-Stitcher-AI-addon.zip' | Format-Table Name, Length
 
-      - name: Test both .exe files (open, find FFmpeg, analyse, export, enhance)
+      - name: Test both .exe files (open, find FFmpeg, analyse, edit, play, export, enhance, run a model)
+        env:
+          FPV_MODEL_DIR: ${{ github.workspace }}\models_test
         run: |
           function Test-Exe([string]$exePath, [string]$name) {
             $report = Join-Path $PWD "selftest_$name.txt"
@@ -143,6 +199,11 @@ jobs:
           }
           if (-not (Select-String -Path 'selftest_zip.txt' -Pattern '^AI add-on: found' -Quiet)) {
             throw 'The zip version did not find its AI add-on.'
+          }
+          foreach ($n in 'zip', 'single') {
+            if (-not (Select-String -Path "selftest_$n.txt" -Pattern '^clean-up model: ok' -Quiet)) {
+              throw "The $n .exe could not run the clean-up model (ONNX Runtime)."
+            }
           }
 
       - uses: actions/upload-artifact@v5

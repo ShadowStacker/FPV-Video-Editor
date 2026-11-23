@@ -1,1 +1,4 @@
 numpy>=1.24
+pillow>=10.0
+onnxruntime-directml>=1.17; sys_platform == "win32"
+onnxruntime>=1.17; sys_platform != "win32"

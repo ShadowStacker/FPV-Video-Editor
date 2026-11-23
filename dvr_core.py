@@ -16,6 +16,7 @@ import math
 import os
 import platform
 import re
+import copy
 import shutil
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak
@@ -211,6 +212,13 @@ class Segment:
 
 
 @dataclass
+class Chapter:
+    t: float             # session time
+    name: str
+    id: int = 0
+
+
+@dataclass
 class Settings:
     min_cut: float = 1.0          # only cut static runs at least this long (s)
     pad: float = 0.0              # seconds of static kept either side of a cut
@@ -252,6 +260,9 @@ class Session:
         self.segments: list[Segment] = []
         self.notes: list[str] = []
         self.settings = Settings()
+        self.chapters: list[Chapter] = []        # chapters added by the user
+        self.flight_names: dict[int, str] = {}   # flight chapters the user renamed
+        self.edited = False                      # Keep/Cut or cut times changed by hand
 
     # ---- helpers ---------------------------------------------------------
     def frames_for(self, seconds: float) -> int:
@@ -303,6 +314,46 @@ class Session:
 
     def kept_duration(self) -> float:
         return float(self.play_durations().sum())
+
+    def frame_at(self, t: float) -> int:
+        """Index of the frame on screen at session time t."""
+        return int(np.clip(np.searchsorted(self.t, t + 1e-6, side="right") - 1, 0, max(0, self.n - 1)))
+
+    def nearest_frame_start(self, t: float) -> int:
+        """Index of the frame whose start is closest to session time t."""
+        g = int(np.clip(np.searchsorted(self.t, t), 0, max(0, self.n - 1)))
+        if g > 0 and abs(self.t[g - 1] - t) <= abs(self.t[g] - t):
+            g -= 1
+        return g
+
+    def segment_at(self, t: float) -> int:
+        g = self.frame_at(t)
+        for i, sg in enumerate(self.segments):
+            if sg.f0 <= g < sg.f1:
+                return i
+        return len(self.segments) - 1
+
+    def out_to_session(self, o: float, keep: np.ndarray | None = None) -> float:
+        """Output-video time -> session time (the kept frame showing at that moment)."""
+        if keep is None:
+            keep = self.keep_mask()
+        idx = np.flatnonzero(keep)
+        if not len(idx):
+            return 0.0
+        ot = self.output_times(keep)[idx]
+        k = int(np.clip(np.searchsorted(ot, o + 1e-6, side="right") - 1, 0, len(idx) - 1))
+        g = int(idx[k])
+        return float(self.t[g] + min(max(0.0, o - ot[k]), self.fdur[g] * 0.999))
+
+    def session_to_out(self, t: float, keep: np.ndarray | None = None) -> float:
+        if keep is None:
+            keep = self.keep_mask()
+        g = self.frame_at(t)
+        ot = self.output_times(keep)
+        if keep[g]:
+            return float(ot[g] + min(max(0.0, t - self.t[g]), self.play_durations(keep)[g]))
+        nxt = np.flatnonzero(keep[g:])
+        return float(ot[g + nxt[0]]) if len(nxt) else float(self.play_durations(keep).sum())
 
 
 # ---------------------------------------------------------------------------
@@ -833,6 +884,223 @@ def renumber_flights(s: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Editing the cuts by hand
+# ---------------------------------------------------------------------------
+MIN_PART_S = 0.2          # an edited part is never shorter than this
+
+
+def _set_range(s: Session, sg: Segment, f0: int, f1: int) -> None:
+    sg.f0, sg.f1 = f0, f1
+    sg.t0 = float(s.t[f0])
+    sg.t1 = float(s.t[f1 - 1] + s.fdur[f1 - 1])
+
+
+def _refresh(s: Session) -> None:
+    """Weak-signal share, flight numbers and lengths in the labels after an edit."""
+    for sg in s.segments:
+        if sg.kind == "signal":
+            sg.weak_pct = 100.0 * float((s.labels[sg.f0:sg.f1] == LABEL_WEAK).mean()) if sg.f1 > sg.f0 else 0.0
+        else:
+            sg.label = re.sub(r"\((\d+(?:\.\d+)?)s\)", f"({sg.duration:.1f}s)", sg.label, count=1)
+    renumber_flights(s)
+
+
+def snapshot(s: Session):
+    """Everything an edit can change (for Undo)."""
+    return copy.deepcopy((s.segments, s.chapters, s.flight_names, s.edited))
+
+
+def restore(s: Session, snap) -> None:
+    s.segments, s.chapters, s.flight_names, s.edited = copy.deepcopy(snap)
+
+
+def edge_limits(s: Session, i: int, which: str) -> tuple[float, float] | None:
+    """Session-time range the start or end of segment i can be moved to (None = it can't move)."""
+    segs = s.segments
+    if (which == "start" and i == 0) or (which == "end" and i == len(segs) - 1):
+        return None
+    a, b = (segs[i - 1], segs[i]) if which == "start" else (segs[i], segs[i + 1])
+    lo = s.t[min(s.n - 1, s.frame_at(a.t0 + MIN_PART_S) + 1)] if a.duration > MIN_PART_S else s.t[a.f0 + 1]
+    hi = s.t[max(0, s.frame_at(b.t1 - MIN_PART_S))] if b.duration > MIN_PART_S else s.t[b.f1 - 1]
+    return float(min(lo, hi)), float(max(lo, hi))
+
+
+def move_edge(s: Session, i: int, which: str, t: float) -> float | None:
+    """Move the start or end of segment i to the frame starting nearest to t (the
+    neighbouring segment follows). Returns the new time, or None if it can't move."""
+    lim = edge_limits(s, i, which)
+    if lim is None:
+        return None
+    t = min(max(t, lim[0]), lim[1])
+    a, b = (s.segments[i - 1], s.segments[i]) if which == "start" else (s.segments[i], s.segments[i + 1])
+    g = s.nearest_frame_start(t)
+    g = min(max(g, a.f0 + 1), b.f1 - 1)
+    if g == b.f0:
+        return float(s.t[g])
+    _set_range(s, a, a.f0, g)
+    _set_range(s, b, g, b.f1)
+    s.edited = True
+    _refresh(s)
+    return float(s.t[g])
+
+
+def split_segment(s: Session, i: int, t: float) -> bool:
+    sg = s.segments[i]
+    g = s.nearest_frame_start(t)
+    if g <= sg.f0 or g >= sg.f1 or t - sg.t0 < MIN_PART_S - 1e-6 or sg.t1 - t < MIN_PART_S - 1e-6:
+        return False
+    new = copy.copy(sg)
+    _set_range(s, sg, sg.f0, g)
+    _set_range(s, new, g, new.f1)
+    new.warn = False
+    s.segments.insert(i + 1, new)
+    s.edited = True
+    _refresh(s)
+    return True
+
+
+def toggle_segment(s: Session, i: int) -> None:
+    sg = s.segments[i]
+    sg.action = "cut" if sg.action == "keep" else "keep"
+    s.edited = True
+    _refresh(s)
+
+
+def reset_edits(s: Session) -> None:
+    """Back to the detected cuts (chapters stay)."""
+    classify(s, s.settings)
+    s.edited = False
+
+
+# ---------------------------------------------------------------------------
+# Chapters
+# ---------------------------------------------------------------------------
+YT_MIN_CHAPTERS, YT_MIN_LEN = 3, 10.0
+
+
+def add_chapter(s: Session, t: float, name: str = "") -> Chapter:
+    cid = max((c.id for c in s.chapters), default=0) + 1
+    ch = Chapter(float(s.t[s.frame_at(t)]), name or f"Chapter {len(s.chapters) + 1}", cid)
+    s.chapters.append(ch)
+    return ch
+
+
+def chapter_list(s: Session, keep: np.ndarray | None = None) -> list[dict]:
+    """Chapters of the export in output-video order:
+    {"out": output time, "at": session time, "name", "mine": added by the user,
+     "flight": flight number or 0, "id": user chapter id, "moved": was in a cut part}."""
+    if s.n == 0:
+        return []
+    if keep is None:
+        keep = s.keep_mask()
+    if not keep.any():
+        return []
+    out_t = s.output_times(keep)
+    segs = s.segments
+    found = []
+    last = 0
+    for i, sg in enumerate(segs):
+        if sg.kind != "signal" or sg.action != "keep" or sg.flight == last:
+            continue
+        last = sg.flight
+        j = sg.f0
+        if i > 0 and segs[i - 1].kind == "nosignal":
+            # start the chapter right at the cut, not after the kept bit of static
+            gap = np.flatnonzero(~keep[segs[i - 1].f0:sg.f0])
+            if len(gap):
+                j = segs[i - 1].f0 + int(gap[-1]) + 1
+        found.append({"out": float(out_t[j]), "at": float(s.t[j]), "name": s.flight_names.get(sg.flight) or
+                      f"Flight {sg.flight}", "mine": False, "flight": sg.flight, "id": 0, "moved": False})
+    for ch in s.chapters:
+        g = s.frame_at(ch.t)
+        moved = not keep[g]
+        if moved:
+            nxt = np.flatnonzero(keep[g:])
+            if not len(nxt):
+                continue
+            g += int(nxt[0])
+        found.append({"out": float(out_t[g]), "at": float(s.t[g]), "name": ch.name, "mine": True,
+                      "flight": 0, "id": ch.id, "moved": moved})
+    found.sort(key=lambda c: (c["out"], 0 if c["mine"] else 1))
+    merged: list[dict] = []
+    for c in found:                    # one chapter per moment; a chapter of yours wins
+        if merged and abs(merged[-1]["out"] - c["out"]) < 0.5:
+            if c["mine"] and not merged[-1]["mine"]:
+                merged[-1] = c
+            continue
+        merged.append(c)
+    if merged:
+        merged[0]["out"] = 0.0
+    total = float(s.play_durations(keep).sum())
+    for k, c in enumerate(merged):
+        c["len"] = (merged[k + 1]["out"] if k + 1 < len(merged) else total) - c["out"]
+    return merged
+
+
+def youtube_text(chapters: list[dict]) -> str:
+    return "\n".join(f"{fmt_time(c['out'])} {c['name']}" for c in chapters)
+
+
+def youtube_checks(chapters: list[dict]) -> list[tuple[bool, str]]:
+    """(ok, message) lines: does YouTube accept these as chapters?"""
+    msgs = []
+    if len(chapters) < YT_MIN_CHAPTERS:
+        msgs.append((False, f"YouTube needs at least {YT_MIN_CHAPTERS} chapters; with {len(chapters)} it shows none."))
+    for c in chapters:
+        if c["len"] < YT_MIN_LEN:
+            msgs.append((False, f'"{c["name"]}" is {c["len"]:.1f} s long; YouTube needs at least '
+                                f'{YT_MIN_LEN:.0f} s per chapter.'))
+        if c["moved"]:
+            msgs.append((False, f'"{c["name"]}" was in a cut part, so it starts at the next kept moment.'))
+    if not msgs:
+        msgs.append((True, f"Ready for YouTube: {len(chapters)} chapters, first at 00:00, "
+                           f"all at least {YT_MIN_LEN:.0f} s."))
+    return msgs
+
+
+def save_chapters_txt(s: Session, video_path: str, keep: np.ndarray | None = None) -> str | None:
+    """<video>_chapters.txt: the chapter list ready to paste into a YouTube description."""
+    ch = chapter_list(s, keep)
+    if not ch:
+        return None
+    path = os.path.splitext(video_path)[0] + "_chapters.txt"
+    text = youtube_text(ch) + "\n"
+    notes = [m for ok, m in youtube_checks(ch) if not ok]
+    if notes:
+        text += "\n" + "\n".join("Note: " + m for m in notes) + "\n"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path
+
+
+def repair_hints(s: Session, keep: np.ndarray, fps: float, n_out: int) -> np.ndarray:
+    """For every frame of a constant-frame-rate export of the kept frames: did the detector
+    see anything suspicious there (weak signal, tearing, partial snow, colour loss, a jump)?"""
+    hint = np.zeros(n_out, bool)
+    idx = np.flatnonzero(keep)
+    if not len(idx) or n_out == 0:
+        return hint
+    f = s.f
+    bad = s.labels != LABEL_GOOD
+    if "tear" in f:
+        bad |= f["tear"] > TEAR_T
+    if "snow" in f:
+        bad |= f["snow"] > 0.25
+    if "chroma" in f and keep.any():
+        med = float(np.median(f["chroma"][keep])) if keep.any() else 0.0
+        if med >= 3.0:
+            bad |= f["chroma"] < 0.5 * med
+    if "motion" in f and keep.any():
+        mm = float(np.median(f["motion"][keep]))
+        bad |= f["motion"] > max(25.0, 4.0 * mm)
+    ot = s.output_times(keep)[idx]
+    k = np.clip(np.searchsorted(ot, (np.arange(n_out) + 0.5) / fps, side="right") - 1, 0, len(idx) - 1)
+    hint = bad[idx][k]
+    r = max(3, int(round(0.15 * fps)))       # the frame rate conversion can shift frames a little
+    return np.convolve(hint.astype(np.float32), np.ones(2 * r + 1), mode="same") > 0
+
+
+# ---------------------------------------------------------------------------
 # Export
 # ---------------------------------------------------------------------------
 @dataclass
@@ -942,29 +1210,20 @@ def write_concat_list(pieces: list[Piece], path: str, tmpdir: str | None = None,
     return total
 
 
-def write_chapters(s: Session, path: str) -> None:
-    keep = s.keep_mask()
-    out_t = s.output_times(keep)
-    total = float(s.play_durations(keep).sum())
-    starts = []
-    segs = s.segments
-    for i, sg in enumerate(segs):
-        if sg.kind == "signal" and sg.action == "keep" and "(continued)" not in sg.label:
-            j = sg.f0
-            if i > 0 and segs[i - 1].kind == "nosignal":
-                # start the chapter right at the cut, not after the kept bit of static
-                gap = np.flatnonzero(~keep[segs[i - 1].f0:sg.f0])
-                if len(gap):
-                    j = segs[i - 1].f0 + int(gap[-1]) + 1
-            t0 = 0.0 if not starts else float(out_t[min(j, s.n - 1)])
-            starts.append((t0, f"Flight {sg.flight}"))
+def write_chapters(s: Session, path: str, keep: np.ndarray | None = None) -> int:
+    """FFmpeg metadata file with the export's chapters. Returns the number of chapters."""
+    if keep is None:
+        keep = s.keep_mask()
+    ch = chapter_list(s, keep)
     lines = [";FFMETADATA1", f"title={APP_NAME} export"]
-    for i, (t0, name) in enumerate(starts):
-        t1 = starts[i + 1][0] if i + 1 < len(starts) else total
-        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={int(t0 * 1000)}",
-                  f"END={int(max(t1, t0 + 0.001) * 1000)}", f"title={name}"]
+    for c in ch:
+        name = c["name"].replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;") \
+            .replace("#", "\\#").replace("\n", " ")
+        lines += ["[CHAPTER]", "TIMEBASE=1/1000", f"START={int(round(c['out'] * 1000))}",
+                  f"END={int(round((c['out'] + max(c['len'], 0.001)) * 1000))}", f"title={name}"]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+    return len(ch)
 
 
 def _run_ffmpeg_progress(cmd, total, progress, cancel, label):
@@ -1037,7 +1296,8 @@ def export_video(s: Session, out_path: str, progress=None, cancel: threading.Eve
                              "Writing video (lossless copy)...")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    return {"pieces": len(pieces), "duration": total}
+    txt = save_chapters_txt(s, out_path, keep) if chapters and keep is None else None
+    return {"pieces": len(pieces), "duration": total, "chapters_txt": txt}
 
 
 def export_clip(s: Session, t0: float, t1: float, out_path: str, cancel=None) -> None:

@@ -24,7 +24,7 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto :fail
 )
 set "VPY=.venv\Scripts\python.exe"
-echo Installing build tools (numpy, pyinstaller)...
+echo Installing build tools (numpy, pillow, onnxruntime, pyinstaller)...
 "%VPY%" -m pip install --disable-pip-version-check -q --upgrade pip
 "%VPY%" -m pip install --disable-pip-version-check -q -r requirements.txt pyinstaller
 if errorlevel 1 goto :fail
@@ -32,6 +32,7 @@ if errorlevel 1 goto :fail
 rem ------------------------------------------------------------- build exe
 echo Building the program (takes a minute)...
 "%VPY%" -m PyInstaller --noconfirm --clean --log-level WARN --onefile --windowed ^
+    --collect-binaries onnxruntime --hidden-import PIL._tkinter_finder ^
     --name "FPV DVR Stitcher" fpv_dvr_stitcher.py
 if errorlevel 1 goto :fail
 copy /y README.txt dist\ >nul

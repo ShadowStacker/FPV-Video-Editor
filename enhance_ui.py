@@ -12,35 +12,44 @@ from tkinter import ttk, filedialog, messagebox
 
 import dvr_core as dc
 import enhance as en
+import models as mdl
 
 DENOISE = ["Off", "Light", "Medium", "Strong"]
 SHARPEN = ["Off", "Light", "Medium"]
 SIZES = {1080: "1080p", 1440: "1440p - recommended for YouTube", 2160: "2160p (4K) - slow"}
 CODECS = {"auto": "Auto (best available)", "hevc": "HEVC / H.265", "h264": "H.264 (most compatible)",
           "av1": "AV1 (smallest files)"}
-MODELS = {"fast": "Fast (smoother look)", "detailed": "Detailed (slower)"}
+MODELS = {"fast": "Fast (built-in, smooth look)", "detailed": "Detailed (built-in, slower)",
+          **{m.id: m.name for m in mdl.upscale_models()}}
+CLEANUPS = {"": "Off", **{m.id: m.name for m in mdl.clean_models()}}
 AIRES = {"full": "Full size (best detail)", "1080": "1080p, then scale up (faster)"}
 FPSDETAIL = {"std": "Standard", "hd": "High-detail (slower)"}
 PRESET_LABELS = {
     "quick": "Quick - no AI, about real time",
-    "balanced": "Balanced - fast AI model (recommended)",
-    "best": "Best quality - detailed AI model",
+    "balanced": "Balanced - clean-up + fast AI (recommended)",
+    "best": "Best quality - clean-up + detailed AI",
     "custom": "Custom",
 }
 
 # colours of the estimate bar
-SEG = {"prep": "#8aa4bf", "ai": "#005fb8", "fps": "#6f42c1", "enc": "#2e9e44"}
+SEG = {"prep": "#8aa4bf", "clean": "#d08a2c", "ai": "#005fb8", "fps": "#6f42c1", "enc": "#2e9e44"}
+
+
+def _models_tip(kind: str) -> str:
+    return "\n".join(f"• {m.name}: {m.what} {m.good}" for m in mdl.CATALOG if m.kind == kind)
 
 # hover help: title, what it does, quality, speed, recommended
 TIPS = {
     "quick": ("Quick (no AI)", "Cleans speckles and grain, sharpens and upscales with a standard resize. "
               "Runs without the AI add-on.", "Good; fine detail stays soft", "Fastest, about real time",
               "Checking a session, or very long sessions"),
-    "balanced": ("Balanced", "Fast AI model at full size, light denoise, all speed options on.",
+    "balanced": ("Balanced", "Repair, the BleedOut clean-up model, then the Fast AI model at full size, light "
+                 "denoise, all speed options on.",
                  "Very good; slightly smoother fine textures than Best quality",
                  "Several times faster than Best quality",
                  "YouTube uploads, if the Fast model looks right in Compare frame"),
-    "best": ("Best quality", "Detailed AI model at full size, light denoise, all speed options on.",
+    "best": ("Best quality", "Repair, the BleedOut clean-up model, then the Detailed AI model at full size, "
+             "light denoise, all speed options on.",
              "Best; sharpest detail", "Slowest; the AI takes most of the time",
              "Your best flights, when time doesn't matter"),
     "custom": ("Custom", "Your own mix of options. The preset switches to Custom as soon as you change "
@@ -60,10 +69,28 @@ TIPS = {
     "upscale": ("Upscaling", "AI (Real-ESRGAN) rebuilds detail while enlarging. Standard is a high-quality "
                 "resize.", "AI looks much clearer on YouTube",
                 "AI takes far longer and needs the graphics card", "AI for uploads, Standard for quick checks"),
-    "model": ("AI model", "Detailed is the strongest general model. Fast is a small model built for video.",
-              "Detailed: sharpest. Fast: slightly smoother on pine needles, grass and gravel.",
-              "Fast is roughly 5-10x faster; with Detailed the AI is most of an export's time.",
-              "Compare both with Compare frame, then pick. Fast if they look close."),
+    "model": ("AI model", "Built-in: Detailed is the strongest general model, Fast a small model built for "
+              "video (both run with the AI add-on). The others are downloaded when first used (a few MB) and "
+              "run with ONNX Runtime on the graphics card:\n" + _models_tip("upscale"),
+              "Detailed: sharpest. Fast: slightly smoother on pine needles, grass and gravel. "
+              "General - keeps texture: most natural on good-signal footage.",
+              "Fast and the General models are quick; Detailed several times slower; VHS to HD slowest.",
+              "Compare a few with Compare frame, then pick. Fast if they look close."),
+    "fix_broken": ("Replace broken frames", "Frames that came out torn, rolled or blown out when the signal broke "
+                   "up, while the frames either side are fine, are replaced. With the AI add-on they are redrawn as "
+                   "in-between frames (RIFE) in AI or 60 fps exports; otherwise the nearest good frame is shown "
+                   "twice. Only places where the analysis saw weak signal are checked, and breakups longer than "
+                   "6 frames stay in, so a crash still shows.",
+                   "Removes single-frame flashes of garbage", "Almost free", "On"),
+    "fix_lines": ("Repair lines", "Fills in short-lived streak lines and bands of rainbow colour noise across the "
+                  "picture from the rows above and below. Colour bands keep their brightness and detail. The OSD and "
+                  "anything that stays in place are left alone.",
+                  "Cleaner frames during breakup; no change on clean footage", "Small (processor)", "On"),
+    "cleanup": ("Clean-up model", "An AI model that cleans the picture before anything else, at the recording's "
+                "own size. Downloaded the first time it is used (1-4 MB):\n" + _models_tip("clean"),
+                "BleedOut makes the biggest difference on analog FPV footage; the Heavy ones also smooth detail",
+                "Runs on the graphics card alongside the other steps; adds a little to an export",
+                "Rainbows & colour bleed (BleedOut). Use Compare frame to see it."),
     "ai_res": ("AI resolution", "Full size: the AI makes the final picture (2560x1440 at 1440p). "
                "1080p, then scale up: the AI makes 1920x1080 and a standard resize takes it to the output "
                "size.", "Full size has a little more fine detail", "The 1080p option is about 45% less AI work",
@@ -219,7 +246,7 @@ class EnhanceDialog(tk.Toplevel):
         self._loading = False
         self._changed()
         self.after(100, self._poll)
-        threading.Thread(target=self._detect, daemon=True).start()
+        threading.Thread(target=self._detect, args=(self.es.codec,), daemon=True).start()
         self._fps_trace = app.v_fps60.trace_add("write", lambda *a: self._changed())
         self.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -310,7 +337,7 @@ class EnhanceDialog(tk.Toplevel):
         self._row(left, r, "Upscaling", "upscale", upscale)
         r += 1
         _, self.cb_model = self._row(left, r, "AI model", "model",
-                                     self._combo(list(MODELS.values()), self.v_model, 20), indent=True)
+                                     self._combo(list(MODELS.values()), self.v_model, 34), indent=True)
         r += 1
         _, self.cb_aires = self._row(left, r, "AI resolution", "ai_res",
                                      self._combo(list(AIRES.values()), self.v_aires, 26), indent=True)
@@ -320,8 +347,27 @@ class EnhanceDialog(tk.Toplevel):
         _, self.cb_fpsdetail = self._row(left, r, "60 fps detail", "fps_detail",
                                          self._combo(list(FPSDETAIL.values()), self.v_fpsdetail, 20), indent=True)
 
+        rf = ttk.LabelFrame(right, text="Repair and clean-up", padding=(10, 6))
+        rf.pack(fill="x")
+        self.v_broken = tk.BooleanVar()
+        self.v_lines = tk.BooleanVar()
+        self.v_cleanup = tk.StringVar()
+        self._check(rf, 0, "Replace broken frames", self.v_broken, "fix_broken", colspan=1)
+        self._check(rf, 1, "Repair lines", self.v_lines, "fix_lines", colspan=1)
+        cf = ttk.Frame(rf)
+        cf.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        lbl = ttk.Label(cf, text="Clean-up model")
+        lbl.pack(side="left", padx=(0, 6))
+        self.cb_cleanup = ttk.Combobox(cf, values=list(CLEANUPS.values()), textvariable=self.v_cleanup,
+                                       state="readonly", width=34)
+        self.cb_cleanup.bind("<<ComboboxSelected>>", lambda e: self._changed())
+        self.cb_cleanup.pack(side="left")
+        self._q(cf, "cleanup").pack(side="left", padx=4)
+        self.help.attach(lbl, "cleanup")
+        self.help.attach(self.cb_cleanup, "cleanup")
+
         sf = ttk.LabelFrame(right, text="Speed", padding=(10, 6))
-        sf.pack(fill="x")
+        sf.pack(fill="x", pady=(10, 0))
         self.v_overlap = tk.BooleanVar()
         self.v_cores = tk.BooleanVar()
         self.v_gpudn = tk.BooleanVar()
@@ -356,8 +402,8 @@ class EnhanceDialog(tk.Toplevel):
         self.bar.bind("<Configure>", lambda e: self._draw_bar())
         leg = ttk.Frame(ef)
         leg.pack(fill="x")
-        for key, txt in (("prep", "Preparing frames (processor)"), ("ai", "AI upscaling"), ("fps", "60 fps"),
-                         ("enc", "Encoding")):
+        for key, txt in (("prep", "Preparing frames (processor)"), ("clean", "Clean-up model"),
+                         ("ai", "AI upscaling"), ("fps", "60 fps"), ("enc", "Encoding")):
             sw = tk.Canvas(leg, width=11, height=11, highlightthickness=0, bg=self.panel_bg)
             sw.create_rectangle(0, 0, 11, 11, fill=SEG[key], outline="")
             sw.pack(side="left", padx=(0, 4))
@@ -373,6 +419,12 @@ class EnhanceDialog(tk.Toplevel):
         self.lbl_ai.pack(side="left")
         self.btn_dl = ttk.Button(af, text="Download AI add-on...", command=self.download_ai)
         self.btn_dl.pack(side="left", padx=8)
+        mf = ttk.Frame(top)
+        mf.pack(fill="x", padx=10)
+        self.lbl_models = ttk.Label(mf, text="")
+        self.lbl_models.pack(side="left")
+        self.btn_dlm = ttk.Button(mf, text="Download models", command=self.download_models)
+        self.btn_dlm.pack(side="left", padx=8)
 
         bf = ttk.Frame(top)
         bf.pack(fill="x", **pad)
@@ -399,6 +451,9 @@ class EnhanceDialog(tk.Toplevel):
         es = self.es
         self.v_preset.set(es.preset if es.preset in PRESET_LABELS else "custom")
         self.v_speckle.set(es.speckle)
+        self.v_broken.set(es.fix_broken)
+        self.v_lines.set(es.fix_lines)
+        self.v_cleanup.set(CLEANUPS.get(es.cleanup, CLEANUPS[""]))
         self.v_denoise.set(DENOISE[max(0, min(3, es.denoise))])
         self.v_sharpen.set(SHARPEN[max(0, min(2, es.sharpen))])
         self.v_ai.set(es.ai_upscale)
@@ -414,6 +469,9 @@ class EnhanceDialog(tk.Toplevel):
     def _read(self):
         es = self.es
         es.speckle = bool(self.v_speckle.get())
+        es.fix_broken = bool(self.v_broken.get())
+        es.fix_lines = bool(self.v_lines.get())
+        es.cleanup = next((k for k, v in CLEANUPS.items() if v == self.v_cleanup.get()), "")
         es.denoise = DENOISE.index(self.v_denoise.get()) if self.v_denoise.get() in DENOISE else 1
         es.sharpen = SHARPEN.index(self.v_sharpen.get()) if self.v_sharpen.get() in SHARPEN else 0
         es.ai_upscale = bool(self.v_ai.get())
@@ -455,6 +513,7 @@ class EnhanceDialog(tk.Toplevel):
         else:
             self.tip3.grid_forget()
         en.save_settings(self.es)
+        self._refresh_ai()
         self._update_estimate()
 
     # ------------------------------------------------------------- estimate
@@ -476,7 +535,12 @@ class EnhanceDialog(tk.Toplevel):
             pic = "best" if es.ai_res == "full" or es.height <= 1080 else "excellent"
         else:
             pic = "very good" if es.ai_res == "full" or es.height <= 1080 else "good+"
-        self.lbl_quality.configure(text=f"Picture: {pic}   ·   motion: "
+        extra = []
+        if es.cleanup:
+            extra.append("clean-up model")
+        if es.fix_broken or es.fix_lines:
+            extra.append("repair")
+        self.lbl_quality.configure(text=f"Picture: {pic}{' + ' + ' + '.join(extra) if extra else ''}   ·   motion: "
                                         f"{'smooth 60 fps' if es.fps60 else 'original frame rate'}   ·   "
                                         f"output: {es.height}p")
         self.lbl_measured.configure(
@@ -500,10 +564,9 @@ class EnhanceDialog(tk.Toplevel):
                 xb = max(xa + 2, b / total * w)
                 c.create_rectangle(xa, y0, xb, y1, fill=SEG[k], outline="")
 
-    def _detect(self):
-        self._read()
+    def _detect(self, codec: str):
         try:
-            name = en.pick_encoder(self.es.codec)
+            name = en.pick_encoder(codec)
             self.q.put(("enc", name))
         except Exception as e:
             self.q.put(("enc_fail", str(e)))
@@ -514,7 +577,19 @@ class EnhanceDialog(tk.Toplevel):
             self.lbl_ai.configure(text="AI add-on: installed")
             self.btn_dl.pack_forget()
         else:
-            self.lbl_ai.configure(text="AI add-on: not installed (needed for AI upscaling and smooth 60 fps)")
+            self.lbl_ai.configure(text="AI add-on: not installed (needed for the built-in AI models and "
+                                       "smooth 60 fps)")
+        need = en.models_needed(self.es)
+        miss = en.missing_models(self.es)
+        where = "graphics card" if mdl.gpu_available() else "processor (slow: no DirectX 12 graphics card found)"
+        if miss:
+            size = sum(mdl.BY_ID[m].size_mb for m in miss)
+            self.lbl_models.configure(text="Models: " + ", ".join(mdl.BY_ID[m].name for m in miss)
+                                           + f" not downloaded yet ({size:.0f} MB)")
+            self.btn_dlm.pack(side="left", padx=8)
+        else:
+            self.lbl_models.configure(text=f"Models: downloaded, run on the {where}" if need else "")
+            self.btn_dlm.pack_forget()
 
     # -------------------------------------------------------------- actions
     def _moment(self) -> float:
@@ -528,7 +603,7 @@ class EnhanceDialog(tk.Toplevel):
 
     def _set_busy(self, busy: bool):
         self.busy = busy
-        for b in (self.btn_cmp, self.btn_prev, self.btn_go, self.btn_dl):
+        for b in (self.btn_cmp, self.btn_prev, self.btn_go, self.btn_dl, self.btn_dlm):
             b.configure(state="disabled" if busy else "normal")
         self.btn_cancel.configure(state="normal" if busy else "disabled")
         self.app.lock_for_enhance(busy)
@@ -551,8 +626,37 @@ class EnhanceDialog(tk.Toplevel):
     def _progress(self, f, m):
         self.q.put(("progress", f, m))
 
-    def compare(self):
+    def _ensure_ready(self, then) -> bool:
+        """Download the AI add-on / models these settings need (asks first), then run `then`."""
+        self._read()
+        addon = en.needs_addon(self.es) and not en.ai_installed()
+        miss = en.missing_models(self.es)
+        if not addon and not miss:
+            return True
+        what = (["AI add-on (about 70 MB)"] if addon else []) + \
+               [f"{mdl.BY_ID[m].name} ({mdl.BY_ID[m].size_mb:.0f} MB)" for m in miss]
+        if not messagebox.askyesno("Enhance for YouTube", "These settings need:\n  " + "\n  ".join(what) +
+                                   "\n\nDownload now from this program's GitHub releases?", parent=self):
+            return False
+
+        def job():
+            if addon:
+                en.download_ai_addon(self._progress, self.cancel)
+            for m in miss:
+                mdl.download(m, self._progress, self.cancel)
+            return then
+        self._start(job, "downloaded")
+        return False
+
+    def download_models(self):
         if self.busy:
+            return
+        miss = en.missing_models(self.es)
+        if miss:
+            self._start(lambda: [mdl.download(m, self._progress, self.cancel) for m in miss] and None, "downloaded")
+
+    def compare(self):
+        if self.busy or not self._ensure_ready(self.compare):
             return
         t = self._moment()
         s = self.app.session
@@ -560,7 +664,7 @@ class EnhanceDialog(tk.Toplevel):
         self._start(lambda: (t, en.compare_frame(s, t, self.es, self.cancel)), "compare")
 
     def preview(self):
-        if self.busy:
+        if self.busy or not self._ensure_ready(self.preview):
             return
         t = self._moment()
         s = self.app.session
@@ -569,7 +673,7 @@ class EnhanceDialog(tk.Toplevel):
                     "preview")
 
     def export(self):
-        if self.busy:
+        if self.busy or not self._ensure_ready(self.export):
             return
         s = self.app.session
         first = os.path.splitext(os.path.basename(s.clips[0].path))[0]
@@ -646,17 +750,25 @@ class EnhanceDialog(tk.Toplevel):
                     self.pb.configure(value=1000)
                     self.status.configure(text=f"Saved {r['path']}")
                     self._update_estimate()
+                    rep = ""
+                    if r.get("replaced") or r.get("lines"):
+                        rep = (f"\nRepaired: {r.get('replaced', 0)} broken frame(s) replaced, lines fixed in "
+                               f"{r.get('lines', 0)} frame(s).")
+                    if r.get("cleanup_device"):
+                        rep += f"\nClean-up model ran on the {r['cleanup_device']}."
                     if messagebox.askyesno(
                             "Enhance for YouTube",
                             f"Saved:\n{r['path']}\n\n{r['size'][0]}x{r['size'][1]}, {r['fps']:.0f} fps, "
-                            f"{r['encoder']}, took {en.fmt_minutes(r['seconds'])}.\n\nOpen the folder now?",
+                            f"{r['encoder']}, took {en.fmt_minutes(r['seconds'])}.{rep}\n\nOpen the folder now?",
                             parent=self):
                         open_path(os.path.dirname(r["path"]))
                 elif kind == "downloaded":
                     self._set_busy(False)
                     self.pb.configure(value=1000)
-                    self.status.configure(text="AI add-on installed.")
+                    self.status.configure(text="Downloaded.")
                     self._refresh_ai()
+                    if callable(msg[1]):
+                        self.after(50, msg[1])          # carry on with what was asked for
                 elif kind == "cancelled":
                     self._set_busy(False)
                     self.pb.configure(value=0)

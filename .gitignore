@@ -22,3 +22,5 @@ ai_dl/
 ai_x/
 FPV-DVR-Stitcher-AI-addon.zip
 selftest_youtube.mp4
+models_out/
+models_test/
