@@ -28,6 +28,7 @@ UPSCALERS = {"none": "No upscaling - keep the original size", "std": "Standard r
              **{m.id: m.name for m in mdl.upscale_models()}}
 AIRES = {"full": "Full size (best detail)", "1080": "1080p, then scale up (faster)"}
 FPSDETAIL = {"std": "Standard", "hd": "High-detail (slower)"}
+FPSMODEL = {"new": "RIFE 4.26 (better on fast motion)", "classic": "RIFE 4.6 (original)"}
 PRESET_LABELS = {
     "quick": "Quick - no AI, about real time",
     "balanced": "Balanced - clean-up + fast AI (recommended)",
@@ -111,6 +112,10 @@ TIPS = {
                    "motion at 1440p a little better.",
                    "Same on most FPV clips; High-detail helps on fast flips close to objects",
                    "High-detail is about 70% slower", "Standard"),
+    "fps_model": ("60 fps model", "Which RIFE version makes the in-between frames (also used to redraw replaced "
+                  "broken frames). RIFE 4.26 is newer and handles fast motion (flips, rolls, fast yaw) better than "
+                  "4.6. If it fails on this PC, the program switches to 4.6 by itself.",
+                  "4.26 has fewer warped edges on fast motion", "About the same", "RIFE 4.26"),
     "overlap": ("Work on several steps at once", "Prepares frames, AI-upscales and encodes at the same time "
                 "instead of one after another. The AI starts within seconds instead of waiting for every frame "
                 "to be prepared.", "Identical", "Removes the preparing wait and most of the encoding time",
@@ -247,9 +252,10 @@ def model_note(mid: str) -> tuple[str, bool]:
     if mid in ("fast", "detailed"):
         return ("AI add-on" if en.ai_installed() else "needs the AI add-on"), not en.ai_installed()
     m = mdl.BY_ID[mid]
+    tag = "personal use only · " if m.personal else ""
     if mdl.installed(mid):
-        return "downloaded", False
-    return f"{m.size_mb:.0f} MB, not downloaded", True
+        return tag + "downloaded", False
+    return f"{tag}{m.size_mb:.0f} MB, not downloaded", True
 
 
 class EnhanceDialog(tk.Toplevel):
@@ -395,6 +401,10 @@ class EnhanceDialog(tk.Toplevel):
         r += 1
         _, self.cb_fpsdetail = self._row(pic, r, "60 fps detail", "fps_detail",
                                          self._combo(list(FPSDETAIL.values()), self.v_fpsdetail, 20), indent=True)
+        r += 1
+        self.v_fpsmodel = tk.StringVar()
+        _, self.cb_fpsmodel = self._row(pic, r, "60 fps model", "fps_model",
+                                        self._combo(list(FPSMODEL.values()), self.v_fpsmodel, 30), indent=True)
 
         # ---- right: upscaling, output, speed
         uf = self._group(right, "Upscaling", "upscale")
@@ -529,6 +539,7 @@ class EnhanceDialog(tk.Toplevel):
                                                    es.ai_model if es.ai_model in UPSCALERS else "fast"))
         self.v_aires.set(AIRES.get(es.ai_res, AIRES["full"]))
         self.v_fpsdetail.set(FPSDETAIL.get(es.fps_detail, FPSDETAIL["std"]))
+        self.v_fpsmodel.set(FPSMODEL.get(es.fps_model, FPSMODEL["new"]))
         self.v_overlap.set(es.overlap)
         self.v_cores.set(es.all_cores)
         self.v_gpudn.set(es.gpu_denoise)
@@ -551,6 +562,7 @@ class EnhanceDialog(tk.Toplevel):
         es.ai_res = next((k for k, v in AIRES.items() if v == self.v_aires.get()), "full")
         es.fps60 = bool(self.app.v_fps60.get())
         es.fps_detail = next((k for k, v in FPSDETAIL.items() if v == self.v_fpsdetail.get()), "std")
+        es.fps_model = next((k for k, v in FPSMODEL.items() if v == self.v_fpsmodel.get()), "new")
         es.overlap = bool(self.v_overlap.get())
         es.all_cores = bool(self.v_cores.get())
         es.gpu_denoise = bool(self.v_gpudn.get())
@@ -588,6 +600,7 @@ class EnhanceDialog(tk.Toplevel):
         ai = en.uses_ai(es)
         self.cb_aires.configure(state="readonly" if ai else "disabled")
         self.cb_fpsdetail.configure(state="readonly" if es.fps60 else "disabled")
+        self.cb_fpsmodel.configure(state="readonly" if es.fps60 else "disabled")
         if es.keep_size:
             self.cb_size.grid_remove()
             self.lbl_orig.grid(row=0, column=1, sticky="w", pady=2)
@@ -677,7 +690,11 @@ class EnhanceDialog(tk.Toplevel):
         self.q.put(("gpudn", en.gpu_denoise_works()))
 
     def _refresh_ai(self):
-        if en.ai_installed():
+        if en.ai_installed() and not en.rife_new_installed():
+            self.lbl_ai.configure(text="AI add-on: installed. An update adds the newer 60 fps model (RIFE 4.26).")
+            self.btn_dl.configure(text="Update AI add-on...")
+            self.btn_dl.pack(side="left", padx=8)
+        elif en.ai_installed():
             self.lbl_ai.configure(text="AI add-on: installed")
             self.btn_dl.pack_forget()
         else:
@@ -798,7 +815,7 @@ class EnhanceDialog(tk.Toplevel):
         if self.busy:
             return
         if not messagebox.askyesno("AI add-on", "Download the AI add-on (Real-ESRGAN upscaler and RIFE frame "
-                                   "interpolation, about 70 MB) from this program's GitHub releases?",
+                                   "interpolation, about 85 MB) from this program's GitHub releases?",
                                    parent=self):
             return
         self._start(lambda: en.download_ai_addon(self._progress, self.cancel), "downloaded")

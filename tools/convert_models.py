@@ -36,13 +36,20 @@ def main(out_dir: str) -> int:
     for m in models.CATALOG:
         f32, f16 = (os.path.join(out_dir, n) for n in reversed(models.file_names(m.id)))
         try:
-            pth = os.path.join(src_dir, os.path.basename(m.source))
+            pth = os.path.join(src_dir, m.src_name or os.path.basename(m.source))
             if not os.path.exists(pth):
                 print(f"download {m.source}", flush=True)
                 req = urllib.request.Request(m.source, headers={"User-Agent": "fpv-dvr-stitcher-build"})
                 with urllib.request.urlopen(req, timeout=120) as r, open(pth + ".part", "wb") as fh:
                     fh.write(r.read())
                 os.replace(pth + ".part", pth)
+            if m.sha256:
+                import hashlib
+                with open(pth, "rb") as fh:
+                    got = hashlib.sha256(fh.read()).hexdigest()
+                if got != m.sha256:
+                    os.remove(pth)
+                    raise RuntimeError(f"downloaded file is not the expected one (sha256 {got})")
             d = spandrel.ModelLoader().load_from_file(pth)
             if d.scale != m.scale:
                 raise RuntimeError(f"scale {d.scale}, catalog says {m.scale}")

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak
@@ -1286,7 +1286,7 @@ def _concat_copy(s: Session, pieces: list[Piece], out_path: str, tmpdir: str, pr
 
 
 def export_video(s: Session, out_path: str, progress=None, cancel: threading.Event | None = None,
-                 keep: np.ndarray | None = None, chapters: bool = True) -> dict:
+                 keep: np.ndarray | None = None, chapters: bool = True, chapters_txt: bool = True) -> dict:
     """Stream-copy the kept frames into one file. Returns stats."""
     pieces = build_pieces(s, keep)
     if not pieces:
@@ -1297,7 +1297,7 @@ def export_video(s: Session, out_path: str, progress=None, cancel: threading.Eve
                              "Writing video (lossless copy)...")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    txt = save_chapters_txt(s, out_path, keep) if chapters and keep is None else None
+    txt = save_chapters_txt(s, out_path, keep) if chapters and chapters_txt and keep is None else None
     return {"pieces": len(pieces), "duration": total, "chapters_txt": txt}
 
 

@@ -45,9 +45,13 @@ AI_ADDON_URL = (f"https://github.com/ShadowStacker/FPV-Video-Editor/releases/dow
                 f"FPV-DVR-Stitcher-{dc.APP_VERSION}-AI-addon.zip")
 APP_DATA = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share"),
                         "FPV DVR Stitcher")
-AI_TOOLS = {"realesrgan": "realesrgan-ncnn-vulkan", "rife": "rife-ncnn-vulkan"}
+AI_TOOLS = {"realesrgan": "realesrgan-ncnn-vulkan", "rife": "rife-ncnn-vulkan",
+            "rife-new": "rife-ncnn-vulkan"}     # rife-new: newer RIFE build (TNTwise fork) for RIFE 4.2x
 AI_MODELS = {"detailed": "realesrgan-x4plus", "fast": "realesr-animevideov3"}
 RIFE_MODEL = "rife-v4.6"
+RIFE_NEW_MODEL = "rife-v4.26"
+FPS_MODELS = {"new": "RIFE 4.26", "classic": "RIFE 4.6"}
+_RIFE_NEW_FAILED = False      # set when the newer RIFE failed on this PC: 4.6 is used from then on
 CHUNK_FRAMES = 420          # frames per AI batch (~15 s); keeps temporary files small
 OUTPUT_HEIGHTS = (1080, 1440, 2160)
 VK_ARGS = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
@@ -68,6 +72,8 @@ class EnhanceSettings:
     ai_res: str = "full"         # full: AI makes the output size | 1080: AI makes 1080p, then resize
     fps60: bool = False          # smooth 60 fps with RIFE frame interpolation
     fps_detail: str = "std"      # std | hd (RIFE high-resolution mode, slower)
+    fps_model: str = "new"       # new (RIFE 4.26, better on fast motion) | classic (RIFE 4.6)
+    chapters_txt: bool = True    # save the chapter list as <video>_chapters.txt next to exports
     height: int = 1440           # output height; video sites encode 1440p uploads with more bitrate
     codec: str = "auto"          # auto | hevc | h264 | av1
     quality: int = 19            # constant quality (lower = better, bigger)
@@ -163,6 +169,23 @@ def find_ai(name: str) -> str | None:
         p = os.path.join(d, name, exe)
         if os.path.isfile(p):
             return p
+    return None
+
+
+def rife_new_installed() -> bool:
+    return find_ai("rife-new") is not None
+
+
+def rife_tool(model: str = "new") -> tuple[str, str, str] | None:
+    """(program, model folder, name) for frame interpolation: the newer RIFE when chosen and
+    installed (and it hasn't failed on this PC), else RIFE 4.6."""
+    if model == "new" and not _RIFE_NEW_FAILED:
+        exe = find_ai("rife-new")
+        if exe:
+            return exe, os.path.join(os.path.dirname(exe), RIFE_NEW_MODEL), FPS_MODELS["new"]
+    exe = find_ai("rife")
+    if exe:
+        return exe, os.path.join(os.path.dirname(exe), RIFE_MODEL), FPS_MODELS["classic"]
     return None
 
 
@@ -516,7 +539,7 @@ def _keys(s: dc.Session, es: EnhanceSettings, enc: str) -> dict:
         "prep": f"prep|{es.speckle}|{es.denoise}|{gpu}|{prep_parts(es)}|{wh}|{rep}",
         "clean": f"clean|{es.cleanup}|{stage_size(s, es)[1]}",
         "up": f"up|{es.ai_model}|{ai_out_height(es)}",
-        "rife": f"rife|{es.fps_detail}|{rife_h}",
+        "rife": f"rife|{es.fps_detail}|{rife_h}|{es.fps_model}",
         "enc": f"enc|{enc}|{oh}",
         "quick": f"quick|{es.speckle}|{es.denoise}|{gpu}|{quick_parts(es, enc)}|{oh}|{es.sharpen}|{enc}|{rep}",
     }
@@ -713,22 +736,30 @@ def _upscale_onnx(src: str, dst: str, model, cancel=None) -> None:
             f.result()
 
 
-def _interpolate(src: str, dst: str, count: int, uhd: bool, cancel=None) -> None:
-    exe = find_ai("rife")
-    if exe is None:
+def _interpolate(src: str, dst: str, count: int, uhd: bool, cancel=None, model: str = "new") -> None:
+    global _RIFE_NEW_FAILED
+    tool = rife_tool(model)
+    if tool is None:
         raise RuntimeError("Smooth 60 fps needs the AI add-on (Enhance > Download AI add-on).")
+    exe, model_dir, name = tool
     os.makedirs(dst, exist_ok=True)
     files = sorted(f for f in os.listdir(src) if f.lower().endswith(".jpg"))
     if len(files) < 2:          # RIFE crashes on a folder with one picture: nothing to interpolate anyway
         for k in range(1, max(1, count) + 1):
             shutil.copyfile(os.path.join(src, files[0]), os.path.join(dst, f"{k:08d}.jpg"))
         return
-    cmd = [exe, "-i", src, "-o", dst, "-n", str(count), "-m", os.path.join(os.path.dirname(exe), RIFE_MODEL),
-           "-f", "%08d.jpg"]
+    cmd = [exe, "-i", src, "-o", dst, "-n", str(count), "-m", model_dir, "-f", "%08d.jpg"]
     if uhd:
         cmd.append("-u")
-    _run(cmd, cancel, "Frame interpolation (RIFE)")
-    _sequence(dst, count, "Frame interpolation")
+    try:
+        _run(cmd, cancel, f"Frame interpolation ({name})")
+        _sequence(dst, count, "Frame interpolation")
+    except RuntimeError:
+        if name != FPS_MODELS["new"]:
+            raise
+        _RIFE_NEW_FAILED = True                 # fall back to RIFE 4.6 for the rest of this run
+        shutil.rmtree(dst, ignore_errors=True)
+        _interpolate(src, dst, count, uhd, cancel, "classic")
 
 
 def _parts(duration: float, n: int) -> list[tuple[float, float]]:
@@ -811,19 +842,29 @@ class _Chain:
         self.model_frames = 0
 
     def _finish(self, f: np.ndarray) -> np.ndarray:
-        if self.lines is not None:
-            f = self.lines(f)
         for m in self.models:            # clean-up models one after another
             f = m.run(f)
         if self.models:
             self.model_frames += 1
         return f
 
+    def _lines(self, frames: list[np.ndarray], final: bool = False) -> list[np.ndarray]:
+        if self.lines is None:
+            return frames
+        out = []
+        for f in frames:
+            out += self.lines.push(f)      # one frame later: it needs the next frame too
+        if final:
+            out += self.lines.flush()
+        return out
+
     def push(self, f: np.ndarray) -> list[np.ndarray]:
-        return [self._finish(x) for x in (self.broken.push(f) if self.broken is not None else [f])]
+        frames = self.broken.push(f) if self.broken is not None else [f]
+        return [self._finish(x) for x in self._lines(frames)]
 
     def flush(self) -> list[np.ndarray]:
-        return [self._finish(x) for x in (self.broken.flush() if self.broken is not None else [])]
+        frames = self.broken.flush() if self.broken is not None else []
+        return [self._finish(x) for x in self._lines(frames, final=True)]
 
 
 def _pump(src_cmd: list[str], sink_cmd: list[str], size: tuple[int, int], chain: _Chain, cancel,
@@ -993,7 +1034,8 @@ def enhance(s: dc.Session, out_path: str, es: EnhanceSettings, progress=None,
             record_speed(keys["clean"], (sum(m.busy for m in ctx.models) - busy0) / (ctx.models[0].frames - frames0))
         if t_range is None:
             _add_chapters(s, out_path, tmp, cancel)
-            dc.save_chapters_txt(s, out_path)
+            if es.chapters_txt:
+                dc.save_chapters_txt(s, out_path)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if progress:
@@ -1119,7 +1161,7 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
     ww, wh = work_size(s, es)
     vf_b = ([f"scale={ww}:{wh}:flags=area"] if size != (ww, wh) else []) + clean_filters(es, gpu_dn)
     t_prep = time.time()
-    rife_exe = find_ai("rife") if (ctx is not None and es.fix_broken) else None
+    rife = rife_tool(es.fps_model) if (ctx is not None and es.fix_broken) else None
 
     def prep_part(k):
         a, length = parts[k]
@@ -1268,7 +1310,7 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
                 os.replace(f, os.path.join(cur, f"{i:08d}.jpg"))
                 pos[(part, idx)] = os.path.join(cur, f"{i:08d}.jpg")
             tb = time.time()
-            if rife_exe:
+            if rife:
                 fills = []
                 for part in sorted({p for _, p, _ in batch}):
                     for first, r, ga, gb in ctx.runs(part):
@@ -1277,8 +1319,18 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
                             fills.append(([pos[w] for w in want[:r]], pos[want[r]], pos[want[r + 1]]))
                 if fills:
                     pr.say("redrawing broken frames", k)
-                    repair.rife_fill(cdir, fills, rife_exe, os.path.join(os.path.dirname(rife_exe), RIFE_MODEL),
-                                     _run, cancel)
+                    try:
+                        repair.rife_fill(cdir, fills, rife[0], rife[1], _run, cancel)
+                    except RuntimeError:
+                        # keep the nearest-good-frame replacements; try RIFE 4.6 once if the newer one failed
+                        if cancel.is_set():
+                            raise
+                        classic = rife_tool("classic")
+                        if classic and classic[0] != rife[0]:
+                            try:
+                                repair.rife_fill(cdir, fills, classic[0], classic[1], _run, cancel)
+                            except RuntimeError:
+                                pass
             if uses_ai(es):
                 pr.say("AI upscaling", k)
                 t = time.time()
@@ -1294,7 +1346,7 @@ def _ai_pipeline(s, es, enc, lst, duration, src_fps, out_fps, gpu_dn, out_path, 
                 t = time.time()
                 src_dir, n_out = cur, count
                 gpu_step(lambda: _interpolate(src_dir, os.path.join(cdir, "fps"), n_out,
-                                              uhd=es.fps_detail == "hd", cancel=cancel),
+                                              uhd=es.fps_detail == "hd", cancel=cancel, model=es.fps_model),
                          os.path.join(cdir, "fps"), "Smooth 60 fps", k)
                 record_speed(keys["rife"], (time.time() - t) / max(1, count))
                 shutil.rmtree(cur, ignore_errors=True)

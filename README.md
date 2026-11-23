@@ -38,7 +38,7 @@ into one clean video:
 
 ## Download
 
-Go to **[Releases](../../releases/latest)**. The file names carry the version (for example `1.4.0`):
+Go to **[Releases](../../releases/latest)**. The file names carry the version (for example `1.5.0`):
 
 | File | What it is |
 |---|---|
@@ -49,7 +49,7 @@ Go to **[Releases](../../releases/latest)**. The file names carry the version (f
 No install and no Python needed. Windows 10 or 11, 64-bit. Windows SmartScreen may warn the first
 time because the .exe isn't code-signed: click **More info → Run anyway**.
 
-The AI parts download themselves the first time they're used: the **AI add-on** (about 70 MB,
+The AI parts download themselves the first time they're used: the **AI add-on** (about 85 MB,
 Real-ESRGAN and RIFE) for the built-in AI upscalers and smooth 60 fps, and each **model** (1-45 MB)
 when you tick it. AI features need a graphics card with up-to-date drivers (Vulkan for the add-on,
 DirectX 12 for the models); an NVIDIA RTX card is ideal.
@@ -114,7 +114,8 @@ your own. Video sites read chapters only from the video's **description**, not f
 the file, so **Copy chapter list** copies the list in that format (`00:00 Flight 1` ...) and the window
 checks the usual rules: the first at 00:00, at least 3 chapters, each at least 10 s long. A chapter
 placed in a part you cut moves to the next kept moment. MKV and enhanced MP4 exports get the chapter
-markers, and every export saves the list next to the video as `..._chapters.txt`.
+markers, and every export saves the list next to the video as `..._chapters.txt` (switch that off with
+**Save chapter list next to exports** in the settings).
 
 **Help > Keyboard shortcuts** lists all the keys.
 
@@ -128,6 +129,7 @@ markers, and every export saves the list next to the video as `..._chapters.txt`
 | Protect faint picture hidden in static | on | Static that still hides a steady picture (OSD, or a crashed quad seen through the noise) is kept as weak signal. |
 | Trim post-flight STATS screen | on | Cuts the Betaflight statistics screen between disarming and unplugging. The layout is learned from the recording itself. |
 | Output | AVI | AVI = same format as the originals. MKV = the same video plus chapter markers. |
+| Save chapter list next to exports | on | Saves `..._chapters.txt` (the chapter list ready to paste into a video description) next to every export. Remembered between runs. |
 | Also save signal-loss report | off | A `report.html` with every loss of signal, the last clear frame, and for suspicious losses the frames from 8 s before and a lossless clip of the last 20 seconds. |
 
 Changing a setting re-runs the detection; your own cut changes are reset and **Undo** brings them back.
@@ -161,8 +163,10 @@ Changing anything switches the preset to Custom.
   weak signal) and replaced: redrawn as in-between frames with RIFE in AI / 60 fps exports, otherwise
   by the nearest good frame. Breakups longer than 6 frames are real and stay in, so a crash still shows.
 - **Repair lines.** Short-lived streak lines and bands of rainbow colour noise across the picture are
-  filled in from the rows above and below. Colour bands keep their brightness and detail; the OSD and
-  anything that stays in place are left alone.
+  rebuilt from the frames before and after, lined up with this frame first (the camera moves between
+  frames), so the real detail comes back. When neither neighbour lines up (very fast motion, or it's
+  damaged too) the band is filled in from the rows above and below instead. The OSD and anything that
+  stays in place are left alone.
 
 **Clean-up models** (every frame). Tick none, one or several; ticked models run one after another in
 the order shown (the blue numbers), on the recording's own size, before anything else. See
@@ -171,12 +175,15 @@ the order shown (the blue numbers), on the recording's own size, before anything
 **Upscaling** (pick one)
 - **No upscaling - keep the original size** (e.g. 1280×720). Repair, clean-up, denoise, sharpening and
   60 fps still apply. Doesn't need the AI add-on.
-- **Standard resize** (no AI), **Fast** / **Detailed** (built-in AI, AI add-on), **General x4 - smooth**,
-  **General x4 - keeps texture**, **VHS to HD x2** (downloaded when used).
+- **Standard resize** (no AI), **Fast** / **Detailed** (built-in AI, AI add-on), and the downloaded
+  models: **General x4 - smooth**, **General x4 - keeps texture**, **VHS to HD x2**, **Live action video x2**,
+  **Photo x4 - fast**, **UltraSharp x4**.
 - **AI resolution:** full size, or 1080p then a standard resize to the output size (about 45% less AI work).
 
 **Picture:** clean colour speckles, grain denoise (Off / Light / Medium / Strong), sharpen,
-**Smooth 60 fps** (RIFE; also in the Enhance menu) and **60 fps detail** (Standard or High-detail).
+**Smooth 60 fps** (RIFE; also in the Enhance menu), **60 fps detail** (Standard or High-detail) and
+**60 fps model** (RIFE 4.26, better on fast motion, or the original RIFE 4.6; if 4.26 fails on a PC the
+program switches to 4.6 by itself).
 
 **Output:** 1080p / **1440p** (recommended: video sites encode 1440p uploads with more bitrate, even
 for analog footage) / 4K, and the codec (Auto, HEVC, H.264, AV1). Encoding uses NVIDIA NVENC, AMD AMF
@@ -229,6 +236,8 @@ against PyTorch, and attaches `model-<name>.onnx` files to each release.
 | **Dot crawl & rainbows** ([1x-Dotzilla-Compact](https://openmodeldb.info/models/1x-Dotzilla-Compact)) | Removes dot crawl (crawling dots along edges and around OSD text) and rainbow patterns | Footage where edges and the OSD crawl. Trained on animation: can soften fine texture a little | Real-ESRGAN Compact | zarxrax, WTFPL | 1.2 / 2.4 MB |
 | **Heavy clean-up** ([1x-Archivist_AntiLines](https://github.com/Loganavter/Archivist-Project-Denoiser)) | Strong removal of analog noise, interference lines and compression blocks | Very noisy, breaking-up footage. Smooths detail (slightly painted look) | Real-ESRGAN Compact | Loganavter, MIT | 0.7 / 1.4 MB |
 | **Heavy colour noise** ([1x-Archivist_RGB](https://github.com/Loganavter/Archivist-Project-Denoiser)) | Strong removal of colour noise | Heavy colour noise. Smooths detail like Heavy clean-up | Real-ESRGAN Compact | Loganavter, MIT | 0.7 / 1.4 MB |
+| **Balanced clean-up** ([1x-Archiver-Medium](https://openmodeldb.info/models/1x-Archiver-Medium)) | Balanced removal of grain, dirt and analog noise; milder than the Heavy ones. Tuned for 720p-1080p pictures | HD-mode recordings when BleedOut alone isn't enough | Real-ESRGAN Compact | Loganavter, MIT | 0.7 / 1.4 MB |
+| **Dot crawl & NTSC colour** ([1x-AzuMPEG](https://openmodeldb.info/models/1x-AzuMPEG)) | Removes dot crawl, colour bleed, NTSC colour errors and old video-compression artifacts together | Crawling dots plus smeared colour. Trained on cartoons at low resolution | SPAN | ezogaming, CC0 (no restrictions) | 0.8 / 1.6 MB |
 
 ### Upscalers
 
@@ -239,14 +248,20 @@ against PyTorch, and attaches `model-<name>.onnx` files to each release.
 | **General x4 - smooth** ([realesr-general-x4v3](https://github.com/xinntao/Real-ESRGAN)) | Real-ESRGAN's general model for real-world video; removes noise, smooth clean picture | Noisy footage you want clean | Real-ESRGAN Compact | Xintao Wang et al., BSD-3-Clause | 2.4 / 4.9 MB |
 | **General x4 - keeps texture** (realesr-general-wdn-x4v3) | The same model with less noise removal: keeps grass, trees and gravel | Good-signal footage | Real-ESRGAN Compact | Xintao Wang et al., BSD-3-Clause | 2.4 / 4.9 MB |
 | **VHS to HD x2** ([2x-VHS2HD-RealPLKSR](https://openmodeldb.info/models/2x-VHS2HD-RealPLKSR)) | Restores VHS / analog video at twice the size; keeps detail and a natural look | 720p HD-mode recordings exported at 1440p. Much slower than the others | RealPLKSR | asterixcool, CC-BY-SA-4.0 | 15 / 30 MB |
+| **Live action video x2** ([2x-LiveActionV1-SPAN](https://openmodeldb.info/models/2x-LiveActionV1-SPAN)) | Made for live-action video: fixes compression, smeared colour, rescaling blur, deinterlacing jaggies and on-screen text while staying faithful (no heavy denoise, no colour shifts) | 720p HD-mode recordings exported at 1440p, fast. **Personal use only** | SPAN | jcj83429, CC-BY-NC-SA-4.0 | 0.8 / 1.7 MB |
+| **Photo x4 - fast** ([4x-LSDIRCompact-v2](https://openmodeldb.info/models/4x-LSDIRCompact-v2)) | Fast x4 upscaler trained on real photos with mild compression, noise and blur | Scenery (trees, grass, buildings) when the built-in Fast model looks too cartoon-like | Real-ESRGAN Compact | Philip Hofmann, CC-BY-4.0 | 1.3 / 2.5 MB |
+| **UltraSharp x4 - most detail** ([4x-UltraSharp](https://openmodeldb.info/models/4x-UltraSharp)) | The community's most popular detail model: lots of texture and sharp edges | Good-signal footage; on noisy footage it can sharpen the noise. **Personal use only** | ESRGAN | Kim2091, CC-BY-NC-SA-4.0 | 34 / 67 MB |
 
-Download sizes are half / full precision; both are downloaded.
+Download sizes are half / full precision; both are downloaded. Models marked **personal use only**
+have non-commercial licences: fine for your own videos, not for monetised ones. The window shows
+"personal use only" next to them.
 
 ### Frame interpolation
 
 | Model | What it does | Author, licence |
 |---|---|---|
-| **RIFE v4.6** ([rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan), from [RIFE](https://github.com/hzwer/ECCV2022-RIFE)) | Makes in-between frames for **Smooth 60 fps** (the receiver records about 28 fps), and redraws replaced broken frames | Zhewei Huang et al. (RIFE), nihui (ncnn port); MIT |
+| **RIFE 4.26** (default; [TNTwise's rife-ncnn-vulkan fork](https://github.com/TNTwise/rife-ncnn-vulkan), built by this project's build from a pinned commit) | Makes in-between frames for **Smooth 60 fps** (the receiver records about 28 fps) and redraws replaced broken frames. Handles fast motion (flips, rolls) better than 4.6 | Zhewei Huang et al. (RIFE), TNTwise (port); MIT |
+| **RIFE 4.6** ([rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan), from [RIFE](https://github.com/hzwer/ECCV2022-RIFE)) | The original model; used when chosen, or automatically if 4.26 fails on a PC | Zhewei Huang et al. (RIFE), nihui (ncnn port); MIT |
 
 ## How static is told apart from weak signal
 
@@ -297,7 +312,7 @@ Long HD-mode files are analysed in parallel chunks, which gives exactly the same
 
 Every push to `main` builds and tests everything on GitHub Actions (download the builds from the run's
 **Artifacts**). To publish a version, create a release whose tag matches `APP_VERSION` in
-`dvr_core.py` (for example `v1.4.0`); the build attaches the downloads and the models to it.
+`dvr_core.py` (for example `v1.5.0`); the build attaches the downloads and the models to it.
 
 | File | Contents |
 |---|---|
@@ -311,14 +326,14 @@ Every push to `main` builds and tests everything on GitHub Actions (download the
 | `models.py` | AI model catalog, downloads, ONNX Runtime runner |
 | `tools/convert_models.py` | Converts the catalog's models from PyTorch to ONNX (used by the build) |
 | `tests/smoke_test.py` | End-to-end self-test |
-| `.github/workflows/build.yml` | Model conversion, then the Windows build: test, build both .exe versions, assemble the AI add-on, test the .exe files (including a real model), attach to releases |
+| `.github/workflows/build.yml` | Model conversion and the newer RIFE build, then the Windows build: test, build both .exe versions, assemble the AI add-on, test the .exe files (including a real model), attach to releases |
 
 ## Licences
 
 The bundled `ffmpeg.exe` / `ffprobe.exe` come from [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds)
 (LGPL build); their licence is in the zip download as `FFMPEG-LICENSE.txt`. The AI add-on contains
 [Real-ESRGAN ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN) (BSD-3-Clause),
-[RIFE ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan) (MIT) and [ncnn](https://github.com/Tencent/ncnn)
+[RIFE ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan) (MIT), [TNTwise's fork](https://github.com/TNTwise/rife-ncnn-vulkan) (MIT) and [ncnn](https://github.com/Tencent/ncnn)
 (BSD-3-Clause). The program uses [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT),
 [NumPy](https://numpy.org) (BSD-3-Clause) and [Pillow](https://python-pillow.org) (MIT-CMU). The
 downloadable models keep their authors' licences, listed in [The AI models](#the-ai-models) and in

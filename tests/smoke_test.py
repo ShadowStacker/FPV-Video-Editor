@@ -190,16 +190,20 @@ def fake_ai_tools(d: str) -> str:
             "for k in range(n): shutil.copy(os.path.join(i, src[min(len(src) - 1, k * len(src) // n)]),"
             " os.path.join(o, pat % (k + 1)))\n"),
     }.items():
-        folder = os.path.join(root, name)
-        os.makedirs(os.path.join(folder, "models"), exist_ok=True)
-        os.makedirs(os.path.join(folder, en.RIFE_MODEL), exist_ok=True)
-        with open(os.path.join(folder, "impl.py"), "w") as fh:
-            fh.write(body)
-        exe = os.path.join(folder, en.AI_TOOLS[name])
-        with open(exe, "w") as fh:
-            fh.write(f"#!/bin/sh\nexec {py} {os.path.join(folder, 'impl.py')} \"$@\"\n")
-        os.chmod(exe, 0o755)
+        for folder in ([os.path.join(root, name)] + ([os.path.join(root, "rife-new")] if name == "rife" else [])):
+            _fake_tool(folder, name, body, py)
     return root
+
+
+def _fake_tool(folder: str, name: str, body: str, py: str) -> None:
+    for sub in ("models", en.RIFE_MODEL, en.RIFE_NEW_MODEL):
+        os.makedirs(os.path.join(folder, sub), exist_ok=True)
+    with open(os.path.join(folder, "impl.py"), "w") as fh:
+        fh.write(body)
+    exe = os.path.join(folder, en.AI_TOOLS[name])
+    with open(exe, "w") as fh:
+        fh.write(f"#!/bin/sh\nexec {py} {os.path.join(folder, 'impl.py')} \"$@\"\n")
+    os.chmod(exe, 0o755)
 
 
 def main() -> int:
@@ -379,6 +383,19 @@ def main() -> int:
             else:
                 check(ratio > 6, f"(without repair the broken frame stands out: {ratio:.1f}x normal)")
 
+        import repair
+        rng = np.random.default_rng(5)
+        scene = (np.cumsum(np.cumsum(rng.normal(0, 1, (700, 1200, 3)), 0), 1) % 256).astype(np.uint8)
+        frames = [scene[20 + 2 * i:380 + 2 * i, 30 + 7 * i:670 + 7 * i].copy() for i in range(5)]
+        truth = frames[2].copy()
+        frames[2][150:154] = 250                                          # a streak line
+        lr = repair.LineRepair()
+        outs = [f for fr in frames for f in lr.push(fr)] + lr.flush()
+        e_fix = float(np.abs(outs[2].astype(int) - truth).mean())
+        e_bad = float(np.abs(frames[2].astype(int) - truth).mean())
+        check(len(outs) == 5 and lr.aligned_bands >= 1 and e_fix < 0.25 * e_bad,
+              f"streak line rebuilt from the lined-up neighbouring frames (error {e_bad:.2f} -> {e_fix:.2f})")
+
         mdir = tiny_models(d)
         if mdir:
             os.environ["FPV_MODEL_DIR"] = mdir
@@ -451,6 +468,19 @@ def main() -> int:
             en._interpolate(one, os.path.join(d, "rife1_out"), 3, False)
             check(sorted(os.listdir(os.path.join(d, "rife1_out"))) == ["00000001.jpg", "00000002.jpg", "00000003.jpg"],
                   "a one-frame batch never goes to RIFE (it crashes on one picture)")
+            check(en.rife_tool("new")[2] == "RIFE 4.26" and en.rife_tool("classic")[2] == "RIFE 4.6",
+                  "60 fps model: RIFE 4.26, or 4.6 when chosen")
+            two = os.path.join(d, "rife2")
+            os.makedirs(two, exist_ok=True)
+            for k in (1, 2):
+                shutil.copy(os.path.join(d, "stats.png"), os.path.join(two, f"{k:08d}.jpg"))
+            new_exe = en.find_ai("rife-new")
+            with open(new_exe, "w") as fh:            # a newer RIFE that crashes on this PC
+                fh.write("#!/bin/sh\nexit 3\n")
+            en._interpolate(two, os.path.join(d, "rife2_out"), 4, False)
+            check(en._RIFE_NEW_FAILED and len(os.listdir(os.path.join(d, "rife2_out"))) == 4,
+                  "if RIFE 4.26 fails, RIFE 4.6 takes over")
+            en._RIFE_NEW_FAILED = False
             if mdir:
                 es = en.EnhanceSettings()
                 en.apply_preset(es, "balanced")

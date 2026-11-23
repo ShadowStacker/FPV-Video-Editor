@@ -26,12 +26,12 @@ card) or keeps the original size, can smooth it to 60 fps, and saves an MP4.
 GETTING IT (Windows 10/11)
 --------------------------
 Download from  https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest
-(the file names carry the version, for example 1.4.0)
-  FPV-DVR-Stitcher-1.4.0.exe          One file with everything built in - just
+(the file names carry the version, for example 1.5.0)
+  FPV-DVR-Stitcher-1.5.0.exe          One file with everything built in - just
                                       run it. Takes a few seconds to open.
                                       Downloads the AI add-on (~70 MB) the
                                       first time you use AI.
-  FPV-DVR-Stitcher-1.4.0-windows.zip  Same program, starts faster, AI add-on
+  FPV-DVR-Stitcher-1.5.0-windows.zip  Same program, starts faster, AI add-on
                                       included.
                                 Unzip and run "FPV DVR Stitcher.exe", keeping
                                 the other files and the "ai" folder next to it.
@@ -132,6 +132,8 @@ Trim post-flight STATS   Cuts the Betaflight statistics screen shown between
 Output AVI / MKV         AVI = same format as your originals.
                          MKV = same video, plus the chapter markers (one per
                          flight + your own; VLC: Playback -> Chapter).
+Save chapter list next  Saves ..._chapters.txt (ready to paste into a video
+  to exports (default on) description) next to every export. Remembered.
 Signal-loss report       Saves a folder next to the video with report.html:
   (default off)          every loss of signal with its time in the original
                          files and in the exported video, the last clear frame,
@@ -157,13 +159,17 @@ Repair breakup (only touches the places where the signal broke up):
                    in AI or 60 fps exports) or by the nearest good frame. Only
                    spots where the analysis saw weak signal are checked, and
                    breakups longer than 6 frames stay in.
-  Repair lines     Fills in short-lived streak lines and bands of rainbow colour
-                   noise across the picture. The OSD is left alone.
+  Repair lines     Rebuilds short-lived streak lines and bands of rainbow colour
+                   noise from the frames before and after (lined up with this
+                   frame first), or fills them from the rows above and below
+                   when the neighbours don't line up. The OSD is left alone.
 Clean-up models (run on every frame; tick any number, they run in order):
                      Rainbows & colour bleed (BleedOut) - recommended
                      Dot crawl & rainbows (Dotzilla)
                      Heavy clean-up (Archivist AntiLines) - smooths detail
                      Heavy colour noise (Archivist RGB) - smooths detail
+                     Balanced clean-up (Archivist Medium) - milder
+                     Dot crawl & NTSC colour (AzuMPEG)
                    There are no models made for FPV footage; these are free
                    community models made for analog / VHS video, which has the
                    same faults. Each is downloaded (1-4 MB) the first time it is
@@ -174,10 +180,17 @@ Upscaling (pick one):
   Standard resize  Ordinary high-quality resize, no AI.
   AI models        Built-in (AI add-on): Fast, Detailed. Downloaded when used:
                    General x4 - smooth, General x4 - keeps texture (Real-ESRGAN),
-                   VHS to HD x2 (best on 720p HD-mode recordings; slow).
+                   VHS to HD x2 (best on 720p HD-mode recordings; slow),
+                   Live action video x2 (fast, 720p -> 1440p; personal use
+                   only), Photo x4 - fast, UltraSharp x4 (most detail;
+                   personal use only). "Personal use only" models have
+                   non-commercial licences: not for monetised videos.
   AI resolution    Full size (best), or 1080p then scaled up (~45% less AI work).
 Picture options: colour speckles, grain denoise, sharpen, and
   Smooth 60 fps    AI frame interpolation (RIFE). Also in the Enhance menu.
+  60 fps model     RIFE 4.26 (better on fast motion) or RIFE 4.6. If 4.26
+                   fails on your PC, 4.6 takes over by itself. Older AI
+                   add-ons don't have 4.26: the window offers an update.
   60 fps detail    Standard, or High-detail (better on very fast motion, slower).
 Speed options (all on by default, no effect on quality):
   Work on several steps at once   prepares, AI-upscales and encodes in parallel

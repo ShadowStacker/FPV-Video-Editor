@@ -45,6 +45,9 @@ class ModelInfo:
     source: str          # original model file (converted by tools/convert_models.py)
     page: str            # where it is described
     tile: int = 0        # run in tiles of this size (0 = whole frame)
+    personal: bool = False   # licence allows non-commercial use only
+    sha256: str = ""     # of the original file (checked by tools/convert_models.py)
+    src_name: str = ""   # file name for the original when the address has none (e.g. Google Drive)
 
 
 CATALOG: list[ModelInfo] = [
@@ -95,6 +98,49 @@ CATALOG: list[ModelInfo] = [
               "slow", 1.1, 45.0, "asterixcool", "CC-BY-SA-4.0",
               "https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/2xVHS2HD-RealPLKSR.pth",
               "https://openmodeldb.info/models/2x-VHS2HD-RealPLKSR", tile=512),
+    ModelInfo("archiver_medium", "clean", "Balanced clean-up (Archivist Medium)", 1,
+              "Balanced removal of grain, dirt and analog noise. Milder than the Heavy models, so it keeps "
+              "more detail. Tuned for 720p-1080p pictures.",
+              "HD-mode recordings with grain or noise, when BleedOut alone isn't enough.",
+              "fast", 0.03, 2.1, "Loganavter", "MIT",
+              "https://github.com/Loganavter/Archivist-Project-Denoiser/releases/download/v1.0/"
+              "1x-Archivist_Medium.pth", "https://openmodeldb.info/models/1x-Archiver-Medium",
+              sha256="b94d1fac8873e6bc45cbe8174d0186217a0f2bd4a7a3a103535f6f01972a4b13"),
+    ModelInfo("azumpeg", "clean", "Dot crawl & NTSC colour (AzuMPEG)", 1,
+              "Removes dot crawl, colour bleed, NTSC colour errors and old-style video compression "
+              "artifacts in one go.",
+              "Analog footage with crawling dots and smeared colour. Trained on cartoons at low resolution.",
+              "fast", 0.06, 2.4, "ezogaming", "CC0-1.0 (no restrictions)",
+              "https://drive.usercontent.google.com/download?id=1ECmsVeo_mlS01jlpXyy2HHNCEmBKv_IT"
+              "&export=download&confirm=t", "https://openmodeldb.info/models/1x-AzuMPEG",
+              sha256="e83ca07920197b2a9577c62a0c1052287116fc3e0a9cc835d7e9de4acdfd5bde",
+              src_name="1x-AzuMPEG.safetensors"),
+    ModelInfo("liveaction", "upscale", "Live action video x2 (LiveActionV1)", 2,
+              "Made for live-action video: fixes compression, smeared colour, blur from rescaling, "
+              "deinterlacing jaggies and on-screen text while keeping the picture faithful (no heavy "
+              "denoise, no colour shifts).",
+              "720p HD-mode recordings exported at 1440p: it doubles them directly. Personal use only.",
+              "fast", 0.12, 2.5, "jcj83429", "CC-BY-NC-SA-4.0 (non-commercial)",
+              "https://raw.githubusercontent.com/jcj83429/upscaling/f73a3a02874360ec6ced18f8bdd8e43b5d7bba57/"
+              "2xLiveActionV1_SPAN/2xLiveActionV1_SPAN_490000.pth",
+              "https://openmodeldb.info/models/2x-LiveActionV1-SPAN", personal=True,
+              sha256="8b166c75831ea7f694d9058ee9c8df8148af8cc1d2b57e69e6581b15cab572f7"),
+    ModelInfo("lsdir_compact", "upscale", "Photo x4 - fast (LSDIRCompact v2)", 4,
+              "A fast x4 upscaler trained on real photos with mild compression, noise and blur.",
+              "Scenery (trees, grass, buildings) when the built-in Fast model looks too cartoon-like.",
+              "fast", 0.12, 3.8, "Philip Hofmann (helaman)", "CC-BY-4.0",
+              "https://drive.usercontent.google.com/download?id=1nnhovhW3XMsgnXhx5ILATFvzAhtT8R-2"
+              "&export=download&confirm=t", "https://openmodeldb.info/models/4x-LSDIRCompact-v2",
+              sha256="4f731443dedd83ccacafeafd2f3bf30efab6e6861e70af12a728460f072f3440",
+              src_name="4xLSDIRCompactv2.pth"),
+    ModelInfo("ultrasharp", "upscale", "UltraSharp x4 - most detail", 4,
+              "The community's most popular detail model: adds a lot of texture and sharp edges.",
+              "Good-signal footage. On noisy footage it can over-sharpen the noise: check with Compare "
+              "frame. Personal use only.",
+              "slow", 0.9, 101.0, "Kim2091", "CC-BY-NC-SA-4.0 (non-commercial)",
+              "https://huggingface.co/Kim2091/UltraSharp/resolve/main/4x-UltraSharp.pth",
+              "https://openmodeldb.info/models/4x-UltraSharp", personal=True,
+              sha256="a5812231fc936b42af08a5edba784195495d303d5b3248c24489ef0c4021fe01"),
 ]
 BY_ID = {m.id: m for m in CATALOG}
 
@@ -344,4 +390,5 @@ def notice() -> str:
     lines = ["AI models used by FPV DVR Stitcher (downloaded when first used):", ""]
     for m in CATALOG:
         lines.append(f"{m.name}: by {m.author}, licence {m.licence}. {m.page}")
+    lines += ["", "Models marked non-commercial may only be used for personal, non-commercial videos."]
     return "\n".join(lines)

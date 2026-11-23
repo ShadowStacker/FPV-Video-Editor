@@ -14,8 +14,11 @@ Broken frames
 Line repair
     Analog breakup also leaves bands of rainbow colour noise and bright/dark streak lines
     across the picture for a single frame. Short-lived bands that cover most of the width are
-    found row by row and filled in from the rows above and below: colour noise bands get
-    their colour replaced (brightness and detail stay), streak lines are interpolated.
+    found row by row and rebuilt from the frames before and after, after lining them up with
+    this frame (the camera moves between frames), so the real detail comes back. When neither
+    neighbour lines up (very fast motion, or it is damaged too), the band is filled in from the
+    rows above and below. Colour noise bands get their colour replaced (brightness and detail
+    stay); streak lines are replaced completely.
     Anything that stays in place from frame to frame (the OSD, the horizon) is left alone.
 """
 from __future__ import annotations
@@ -171,15 +174,40 @@ def _bands(rows: np.ndarray, max_h: int, gap: int = 1) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out if b - a <= max_h]
 
 
+def _shift(g0: np.ndarray, g1: np.ndarray, known: np.ndarray, max_shift: int = 64) -> tuple[int, int]:
+    """How far the picture in g1 has moved relative to g0 (rows marked not known are ignored):
+    phase correlation, so it is fast and not fooled by brightness changes."""
+    h, w = g0.shape
+    win = np.outer(np.hanning(h) * known, np.hanning(w)).astype(np.float32)
+    f0 = np.fft.rfft2((g0 - g0[known].mean()) * win)
+    f1 = np.fft.rfft2((g1 - g1[known].mean()) * win)
+    r = f0 * np.conj(f1)
+    r /= np.abs(r) + 1e-6
+    c = np.fft.irfft2(r, s=(h, w))
+    dy, dx = np.unravel_index(int(np.argmax(c)), c.shape)
+    dy = dy - h if dy > h // 2 else dy
+    dx = dx - w if dx > w // 2 else dx
+    if abs(dy) > max_shift or abs(dx) > max_shift * 2:
+        return 0, 0
+    return int(dy), int(dx)
+
+
 class LineRepair:
-    """Fills in short-lived horizontal colour-noise bands and streak lines."""
+    """Fills in short-lived horizontal colour-noise bands and streak lines: from the frames
+    before and after, lined up with this one (rebuilds the real detail), or, when they don't
+    line up, from the rows above and below."""
     CHROMA_K, CHROMA_C, CHROMA_COVER = 2.5, 3.0, 0.4   # band: colour noise > K x normal + C over 40% of width
     LUMA_T, LUMA_COVER = 30.0, 0.75                    # streak: brighter (or darker) by > 30 over 3/4 of the width
+
+    ALIGN_ERR = 14.0      # a neighbour lines up if the rows around the band differ by less than this
 
     def __init__(self):
         self.prev = None          # rows that had a band in the previous frame (detection scale)
         self.fixed_frames = 0
         self.fixed_rows = 0
+        self.aligned_bands = 0    # bands rebuilt from lined-up neighbouring frames
+        self._q: list[np.ndarray] = []
+        self._last = None
 
     def detect(self, frame: np.ndarray):
         f = frame[::2, ::2].astype(np.float32)          # detection at half size
@@ -214,7 +242,28 @@ class LineRepair:
         lb_ = _bands(luma, max(2, H2 // 120), gap=0)
         return cb_, lb_, chroma | luma
 
+    # ---- streaming: each frame is repaired once the frame after it has arrived, so both
+    # neighbours can lend their (lined-up) rows to a damaged band
+    def push(self, frame: np.ndarray) -> list[np.ndarray]:
+        self._q.append(frame)
+        if len(self._q) < 2:
+            return []
+        cur, nxt = self._q
+        out = self._repair(cur, self._last, nxt)
+        self._last = cur
+        self._q = [nxt]
+        return [out]
+
+    def flush(self) -> list[np.ndarray]:
+        out = [self._repair(f, self._last, None) for f in self._q]
+        self._q = []
+        return out
+
     def __call__(self, frame: np.ndarray) -> np.ndarray:
+        """One frame on its own (no neighbours): bands are filled from the rows above and below."""
+        return self._repair(frame, None, None)
+
+    def _repair(self, frame: np.ndarray, before: np.ndarray | None, after: np.ndarray | None) -> np.ndarray:
         cbands, lbands, rows = self.detect(frame)
         prev = self.prev
         if prev is not None:
@@ -234,13 +283,18 @@ class LineRepair:
             for a, b in bands:
                 top = max(0, 2 * a - 2)
                 bot = min(H, 2 * b + 2)
-                above = out[top - 1] if top > 0 else out[bot] if bot < H else None
-                below = out[bot] if bot < H else above
-                if above is None:
-                    continue
-                w = ((np.arange(top, bot) - (top - 1)) / (bot - top + 1))[:, None, None]
-                fill = (1 - w) * above[None] + w * below[None]
-                if kind == "l":
+                fill = self._from_neighbours(frame, top, bot, before, after)
+                aligned = fill is not None
+                if aligned:
+                    self.aligned_bands += 1
+                else:
+                    above = out[top - 1] if top > 0 else out[bot] if bot < H else None
+                    below = out[bot] if bot < H else above
+                    if above is None:
+                        continue
+                    w = ((np.arange(top, bot) - (top - 1)) / (bot - top + 1))[:, None, None]
+                    fill = (1 - w) * above[None] + w * below[None]
+                if kind == "l" or aligned:  # real rows from the neighbours: use them whole
                     out[top:bot] = fill
                 else:                       # keep the brightness, replace the colour
                     yb = out[top:bot] @ np.array([0.299, 0.587, 0.114], np.float32)
@@ -249,3 +303,30 @@ class LineRepair:
                 self.fixed_rows += bot - top
         self.fixed_frames += 1
         return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+    def _from_neighbours(self, frame, top, bot, before, after):
+        """The damaged rows taken from the frames before and after, lined up with this frame first
+        (the camera moves between frames). None if neither lines up well enough."""
+        H, W = frame.shape[:2]
+        ctx = max(16, H // 18)
+        a, b = max(0, top - ctx), min(H, bot + ctx)
+        if (top - a) + (b - bot) < ctx:
+            return None
+        gray = lambda img: img[a:b].astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32)
+        g0 = gray(frame)
+        known = np.ones(b - a, bool)
+        known[top - a:bot - a] = False          # the band itself can't be used for lining up
+        fills = []
+        for nb in (before, after):
+            if nb is None or nb.shape != frame.shape:
+                continue
+            dy, dx = _shift(g0, gray(nb), known)
+            ys = np.clip(np.arange(a, b) - dy, 0, H - 1)
+            xs = np.clip(np.arange(W) - dx, 0, W - 1)
+            moved = nb[ys][:, xs].astype(np.float32)
+            err = float(np.abs(moved[known] @ np.array([0.299, 0.587, 0.114], np.float32) - g0[known]).mean())
+            if err < self.ALIGN_ERR:
+                fills.append(moved[top - a:bot - a])
+        if not fills:
+            return None
+        return fills[0] if len(fills) == 1 else 0.5 * (fills[0] + fills[1])

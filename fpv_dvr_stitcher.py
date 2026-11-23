@@ -291,6 +291,11 @@ class App:
         row += 1
         ttk.Checkbutton(sf, text="Also save signal-loss report (snapshots + clips)",
                         variable=self.v_report).grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        row += 1
+        self.v_chtxt = tk.BooleanVar(value=self.enh_settings.chapters_txt)
+        self.v_chtxt.trace_add("write", self._chtxt_changed)
+        ttk.Checkbutton(sf, text="Save chapter list next to exports (..._chapters.txt)",
+                        variable=self.v_chtxt).grid(row=row, column=0, columnspan=3, sticky="w")
 
         # preview (a small player)
         pf = ttk.LabelFrame(mid, text="Preview", padding=4)
@@ -535,6 +540,10 @@ class App:
                 self.q.put(("error", f"{e}", traceback.format_exc()))
         threading.Thread(target=work, daemon=True).start()
 
+    def _chtxt_changed(self, *_):
+        self.enh_settings.chapters_txt = bool(self.v_chtxt.get())
+        en.save_settings(self.enh_settings)
+
     def _fps60_changed(self, *_):
         self.enh_settings.fps60 = bool(self.v_fps60.get())
         en.save_settings(self.enh_settings)
@@ -557,7 +566,7 @@ class App:
         self._menu_states()
 
     def download_ai(self):
-        if en.ai_installed():
+        if en.ai_installed() and en.rife_new_installed():
             messagebox.showinfo(dc.APP_NAME, "The AI add-on is already installed.")
             return
         if self.session is None:
@@ -626,10 +635,12 @@ class App:
         self.cancel.clear()
         self._set_busy(True)
         want_report = bool(self.v_report.get())
+        chtxt = bool(self.v_chtxt.get())
 
         def work():
             try:
-                info = dc.export_video(s, out, lambda f, m: self.q.put(("progress", f, m)), self.cancel)
+                info = dc.export_video(s, out, lambda f, m: self.q.put(("progress", f, m)), self.cancel,
+                                       chapters_txt=chtxt)
                 rep = None
                 if want_report:
                     rep = dc.write_report(s, out, lambda f, m: self.q.put(("progress", f, m)), self.cancel)
