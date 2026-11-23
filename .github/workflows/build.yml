@@ -91,13 +91,14 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/1.3.268.0/windows/VulkanSDK-1.3.268.0-Installer.exe?Human=true' -OutFile VulkanSDK.exe
-          7z x -aoa ./VulkanSDK.exe -oVulkanSDK | Out-Null
+          Invoke-WebRequest -Uri 'https://sdk.lunarg.com/sdk/download/1.3.296.0/windows/VulkanSDK-1.3.296.0-Installer.exe' -OutFile VulkanSDK.exe
+          Start-Process -Wait -FilePath .\VulkanSDK.exe -ArgumentList '--root', 'C:\VulkanSDK', '--accept-licenses', '--default-answer', '--confirm-command', 'install'
+          if (-not (Test-Path 'C:\VulkanSDK\Lib\vulkan-1.lib')) { throw 'Vulkan SDK did not install' }
 
       - name: Build rife-ncnn-vulkan
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          $env:VULKAN_SDK = "$(pwd)/VulkanSDK"
+          $env:VULKAN_SDK = 'C:\VulkanSDK'
           New-Item -ItemType Directory -Force rife_src/build | Out-Null
           cd rife_src/build
           cmake -A x64 ../src
