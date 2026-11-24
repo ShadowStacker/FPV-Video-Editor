@@ -55,19 +55,23 @@ TIPS = {
              "Your best flights, when time doesn't matter"),
     "custom": ("Custom", "Your own mix of options. The preset switches to Custom as soon as you change "
                "something that differs from a preset.", None, None, None),
-    "repair": ("Repair breakup", "These two only touch the places where the signal broke up. On clean footage "
-               "they change nothing. They are built in (no download) and run on the processor.", None, None,
-               "Both on"),
+    "repair": ("Repair", "Built-in repairs (no download, run on the processor). Replace broken frames only "
+               "checks where the signal broke up; Repair lines checks every frame. Frames without damage are "
+               "left exactly as they are.", None, None, "Both on"),
     "fix_broken": ("Replace broken frames", "Frames that came out torn, rolled or blown out when the signal broke "
                    "up, while the frames either side are fine, are replaced. With the AI add-on they are redrawn as "
                    "in-between frames (RIFE) in AI or 60 fps exports; otherwise the nearest good frame is shown "
                    "twice. Only places where the analysis saw weak signal are checked, and breakups longer than "
                    "6 frames stay in, so a crash still shows.",
                    "Removes single-frame flashes of garbage", "Almost free", "On"),
-    "fix_lines": ("Repair lines", "Fills in short-lived streak lines and bands of rainbow colour noise across the "
-                  "picture from the rows above and below. Colour bands keep their brightness and detail. The OSD and "
-                  "anything that stays in place are left alone.",
-                  "Cleaner frames during breakup; no change on clean footage", "Small (processor)", "On"),
+    "fix_lines": ("Repair lines", "Checks every frame for streak lines and bands of rainbow colour noise across the "
+                  "picture, including lines that last several frames or roll through the picture. Damaged rows are "
+                  "rebuilt from the frames before and after (lined up with this frame first), or filled in from the "
+                  "rows above and below when those have the line too. Anything fixed on screen (the OSD, the black "
+                  "border) is left alone, and when the picture is completely still a steady line is only fixed for "
+                  "half a second, because then it may be part of the scene.",
+                  "Cleaner frames wherever lines appear; frames without lines are untouched", "Small (processor)",
+                  "On"),
     "cleanup": ("Clean-up models", "AI models that clean every frame before anything else, at the recording's own "
                 "size. Tick none, one or several: ticked ones run one after another, in the order shown by the "
                 "numbers. Each is downloaded the first time it is used (1-4 MB) and runs on the graphics card.",
@@ -357,11 +361,11 @@ class EnhanceDialog(tk.Toplevel):
         right.pack(side="left", fill="both", expand=True, padx=(6, 0))
 
         # ---- left: repair, clean-up models, picture
-        rf = self._group(left, "Repair breakup (only where the signal broke up)", "repair")
+        rf = self._group(left, "Repair", "repair")
         self.v_broken = tk.BooleanVar()
         self.v_lines = tk.BooleanVar()
-        self._check(rf, 0, "Replace broken frames", self.v_broken, "fix_broken")
-        self._check(rf, 1, "Repair lines", self.v_lines, "fix_lines")
+        self._check(rf, 0, "Replace broken frames (only where the signal broke up)", self.v_broken, "fix_broken")
+        self._check(rf, 1, "Repair lines (every frame)", self.v_lines, "fix_lines")
 
         cf = self._group(left, "Clean-up models (every frame, run in this order)", "cleanup", pady=(8, 0))
         self.v_clean: dict[str, tk.BooleanVar] = {}

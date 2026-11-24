@@ -38,7 +38,7 @@ into one clean video:
 
 ## Download
 
-Go to **[Releases](../../releases/latest)**. The file names carry the version (for example `1.5.0`):
+Go to **[Releases](../../releases/latest)**. The file names carry the version (for example `1.5.1`):
 
 | File | What it is |
 |---|---|
@@ -157,16 +157,18 @@ quad: it shows exactly what the receiver recorded.
 
 Changing anything switches the preset to Custom.
 
-**Repair breakup** (only touches places where the signal broke up; no change on clean footage)
-- **Replace broken frames.** Frames that came out torn, rolled or blown out, while the frames either
+**Repair** (built in, no download; frames without damage are left exactly as they are)
+- **Replace broken frames** (only where the signal broke up). Frames that came out torn, rolled or blown out, while the frames either
   side are fine, are found by comparing each frame with its neighbours (only where the analysis saw
   weak signal) and replaced: redrawn as in-between frames with RIFE in AI / 60 fps exports, otherwise
   by the nearest good frame. Breakups longer than 6 frames are real and stay in, so a crash still shows.
-- **Repair lines.** Short-lived streak lines and bands of rainbow colour noise across the picture are
-  rebuilt from the frames before and after, lined up with this frame first (the camera moves between
-  frames), so the real detail comes back. When neither neighbour lines up (very fast motion, or it's
-  damaged too) the band is filled in from the rows above and below instead. The OSD and anything that
-  stays in place are left alone.
+- **Repair lines** (every frame). Streak lines and bands of rainbow colour noise across the picture,
+  including lines that last several frames or roll through the picture, are rebuilt from the frames
+  before and after, lined up with this frame first (the camera moves between frames), so the real detail
+  comes back. When the neighbours have the line too or don't line up, the band is filled in from the rows
+  above and below instead. Anything fixed on screen (the OSD, the black border) is left alone, and when
+  the picture is completely still a steady line is only fixed for half a second, because then it may be
+  part of the scene.
 
 **Clean-up models** (every frame). Tick none, one or several; ticked models run one after another in
 the order shown (the blue numbers), on the recording's own size, before anything else. See
@@ -312,7 +314,7 @@ Long HD-mode files are analysed in parallel chunks, which gives exactly the same
 
 Every push to `main` builds and tests everything on GitHub Actions (download the builds from the run's
 **Artifacts**). To publish a version, create a release whose tag matches `APP_VERSION` in
-`dvr_core.py` (for example `v1.5.0`); the build attaches the downloads and the models to it.
+`dvr_core.py` (for example `v1.5.1`); the build attaches the downloads and the models to it.
 
 | File | Contents |
 |---|---|

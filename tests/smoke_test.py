@@ -395,6 +395,23 @@ def main() -> int:
         e_bad = float(np.abs(frames[2].astype(int) - truth).mean())
         check(len(outs) == 5 and lr.aligned_bands >= 1 and e_fix < 0.25 * e_bad,
               f"streak line rebuilt from the lined-up neighbouring frames (error {e_bad:.2f} -> {e_fix:.2f})")
+        frames = [scene[20 + 2 * i:380 + 2 * i, 30 + 7 * i:670 + 7 * i].copy() for i in range(12)]
+        truth = [f.copy() for f in frames]
+        for k in range(3, 9):                                             # a line rolling down for 6 frames
+            frames[k][100 + 4 * k:103 + 4 * k] = 15
+        lr = repair.LineRepair()
+        outs = [f for fr in frames for f in lr.push(fr)] + lr.flush()
+        fixed = sum(float(np.abs(outs[k].astype(int) - truth[k]).mean()) < 0.5 * float(
+            np.abs(frames[k].astype(int) - truth[k]).mean()) for k in range(3, 9))
+        check(fixed == 6, f"a line lasting 6 frames is repaired in every frame ({fixed}/6)")
+        frames = [scene[20 + 2 * i:380 + 2 * i, 30 + 7 * i:670 + 7 * i].copy() for i in range(8)]
+        for f in frames:                                                  # OSD-like text fixed on screen
+            f[300:310, 60:560] = np.where(np.arange(60, 560) % 4 < 2, 250, 10)[None, :, None]
+        ref = [f.copy() for f in frames]
+        lr = repair.LineRepair()
+        outs = [f for fr in frames for f in lr.push(fr)] + lr.flush()
+        check(all(np.array_equal(outs[k][300:310, 60:560], ref[k][300:310, 60:560]) for k in range(2, 8)),
+              "something fixed on screen (like the OSD) is left alone")
 
         mdir = tiny_models(d)
         if mdir:

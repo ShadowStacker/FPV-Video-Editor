@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 APP_NAME = "FPV DVR Stitcher"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 # ---------------------------------------------------------------------------
 # Detection tuning.  Measured on real analog DVR footage (pure snow vs weak

@@ -26,12 +26,12 @@ card) or keeps the original size, can smooth it to 60 fps, and saves an MP4.
 GETTING IT (Windows 10/11)
 --------------------------
 Download from  https://github.com/ShadowStacker/FPV-Video-Editor/releases/latest
-(the file names carry the version, for example 1.5.0)
-  FPV-DVR-Stitcher-1.5.0.exe          One file with everything built in - just
+(the file names carry the version, for example 1.5.1)
+  FPV-DVR-Stitcher-1.5.1.exe          One file with everything built in - just
                                       run it. Takes a few seconds to open.
                                       Downloads the AI add-on (~70 MB) the
                                       first time you use AI.
-  FPV-DVR-Stitcher-1.5.0-windows.zip  Same program, starts faster, AI add-on
+  FPV-DVR-Stitcher-1.5.1-windows.zip  Same program, starts faster, AI add-on
                                       included.
                                 Unzip and run "FPV DVR Stitcher.exe", keeping
                                 the other files and the "ai" folder next to it.
@@ -152,17 +152,21 @@ Presets:
   Balanced         Repair, the BleedOut clean-up model, then the Fast AI model
   (default)        on the graphics card. The recommended choice for uploads.
   Best quality     The same with the Detailed AI model: sharpest, slower.
-Repair breakup (only touches the places where the signal broke up):
-  Replace broken frames  Frames that came out torn, rolled or blown out when the
+Repair (built in; frames without damage are left exactly as they are):
+  Replace broken frames  (only where the signal broke up) Frames that came out torn, rolled or blown out when the
                    signal broke up (while the frames either side are fine) are
                    replaced: redrawn as in-between frames with RIFE (AI add-on,
                    in AI or 60 fps exports) or by the nearest good frame. Only
                    spots where the analysis saw weak signal are checked, and
                    breakups longer than 6 frames stay in.
-  Repair lines     Rebuilds short-lived streak lines and bands of rainbow colour
-                   noise from the frames before and after (lined up with this
-                   frame first), or fills them from the rows above and below
-                   when the neighbours don't line up. The OSD is left alone.
+  Repair lines     (every frame) Rebuilds streak lines and bands of rainbow
+                   colour noise, including lines that last several frames or
+                   roll through the picture, from the frames before and after
+                   (lined up with this frame first), or fills them from the
+                   rows above and below when the neighbours have the line too.
+                   Anything fixed on screen (OSD, black border) is left alone;
+                   on a completely still picture a steady line is only fixed
+                   for half a second (it may be part of the scene).
 Clean-up models (run on every frame; tick any number, they run in order):
                      Rainbows & colour bleed (BleedOut) - recommended
                      Dot crawl & rainbows (Dotzilla)
